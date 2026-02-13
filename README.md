@@ -1,2 +1,91 @@
 # PyEmbedBuilder
-PyEmbedBuilder provides a convenient GUI for creating fully portable, isolated, and distribution-ready embedded environments for Python (.py) applications on Windows.
+
+![Version](https://img.shields.io/badge/version-1.0.0_alpha-orange)
+![Platform](https://img.shields.io/badge/platform-Windows_10%2F11-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+**PyEmbedBuilder** is a convenient, security-focused tool for creating completely portable, isolated, and distribution-ready Python environments on Windows. 
+
+It automates the complex process of downloading embedded Python distributions, verifying their integrity, bootstrapping `pip`, installing dependencies, and securely extracting official components (like Tcl/Tk for Tkinter support) into a clean, portable folder structure.
+
+---
+
+## 🔒 Security & Integrity
+
+Security is the core design principle of PyEmbedBuilder:
+
+*   **Strict Verification:** All downloads from `python.org` are verified.
+*   **HTTPS Only:** Enforced TLS for network operations.
+*   **Audit Trail:** Generates a comprehensive `security_audit.log` for every build, recording source URLs.
+*   **Path Sanitization:** Automatically strips absolute paths from `pip` metadata (`.dist-info`) to prevent and minimize local system information leakage when distributing portable apps with embedded environments.
+*   **Zip-Slip Protection:** Validates all archive extractions against directory traversal attacks.
+
+## ✨ Key Features
+
+*   **Wizard-Style Interface:** Modern, accessible Tkinter GUI with Dark/Light Mode, High Contrast Accessibility Mode and text scaling support.
+*   **Full Python Support:** 
+    *   Download any stable Python version (≥ 3.12.10).
+    *   **Optional Component Extraction:** Automatically add `Scripts`, `tcl`, `Lib`, `libs`, and `include` folders—enabling full standard library support (including `tkinter`) in a portable embedded environment.
+*   **Dependency Management:** Import your `requirements.txt` to pre-install packages into the portable environment.
+*   **Portable Output:** 
+    *   Generates `.bat` launchers automatically.
+    *   Configures `._pth` files correctly for full isolation.
+    *   Creates fully independent and portable Python environments in a `..\My Projects\` folder by default.
+*   **Smart Caching:** Optional downloads cache to save bandwidth when creating multiple similar projects (by default builder auto-clears cache upon each successful build).
+
+## 🚀 Getting Started
+
+### 1. Download & Verify
+Download the release archive and its signature:
+*   `PyEmbedBuilder_(version).7z`
+*   `PyEmbedBuilder_(version).7z.sha256`
+
+**Verify the integrity (PowerShell):**
+```powershell
+Get-FileHash .\PyEmbedBuilder_(version).7z -Algorithm SHA256
+# Compare output with the content of PyEmbedBuilder_(version).7z.sha256
+```
+
+### 2. Installation
+PyEmbedBuilder is fully portable.  No installation is required. It has been successfully built with a running instance of itself.
+The standalone portable version has been compressed with free 7-Zip software. To avoid any issues with .7z archives, I advise installing the free official 7-Zip software for Windows, available [here](https://7-zip.org/download.html).
+1.  Extract `PyEmbedBuilder.7z` to a location of your choice (e.g., `C:\PyEmbedBuilder`).
+2.  Navigate to the extracted folder.
+
+### 3. Usage
+Double-click **`launch_pyembed_builder.bat`** to start the application.
+
+1.  **Create Project:** 
+    *   Name your project.
+    *   Select a Python version (Recommended or Custom).
+    *   (Optional) Select a `requirements.txt` file.
+    *   (Recommended) Check **"Add full stdlib..."** to include Tkinter, pip, and standard headers.
+2.  **Review:** Check the build plan and security parameters.
+3.  **Build:** Watch the automated process:
+    *   Download & Verification
+    *   Core Extraction
+    *   Optional Components Extraction
+    *   pip Bootstrap 
+    *   Optional Packages Installation (requirements.txt)
+    *   Paths Sanitization
+4.  **Complete:** By default your portable environment is ready in `..\My Projects\<Project-Name>`.
+
+## 📦 Output Structure
+
+The builder creates self-contained environments structured for distribution:
+
+```text
+My Projects/
+└── Project-Name/
+    ├── launch.bat                 # App Launcher
+    ├── python-embed/              # The portable Python environment
+    │   ├── python.exe             # Python CLI Shell Binary
+    │   ├── pythonw.exe            # Python Window Mode Shell Binary
+    │   ├── pyembed_builder/       # Application Source Code Location
+    │   ├── Lib/                   # Standard library & site-packages
+    │   ├── Scripts/               # Pip and other CLI tools
+    │   └── ...
+    └── ...
+```
+
+*Disclaimer: This is a very early working alpha version of the software. Always test and verify your portable Python apps before sharing them with others.*
