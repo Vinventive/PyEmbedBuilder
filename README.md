@@ -77,11 +77,16 @@ The builder creates self-contained environments structured for distribution:
 ```text
 My Projects/
 └── Project-Name/
-    ├── launch.bat                 # App Launcher
+    ├── launch.bat                 # Your App Launcher
+    ├── (your_app_here).py         # Entry Point to Your Python Application
+    ├── install_dependencies.bat   # Add new libraries/packages
+    ├── list_dependencies.bat      # List all currently installed libraries/packages
+    ├── uninstall_dependencies.bat # Remove any libraries/packages
+    ├── requirements.txt           # List of recomended required libraries in the current Python project (provide your own when building)
+    ├── build_manifest.json        # App manifest for debuging (remove it before public distribution)
     ├── python-embed/              # The portable Python environment
     │   ├── python.exe             # Python CLI Shell Binary
     │   ├── pythonw.exe            # Python Window Mode Shell Binary
-    │   ├── pyembed_builder/       # Application Source Code Location
     │   ├── Lib/                   # Standard library & site-packages
     │   ├── Scripts/               # Pip and other CLI tools
     │   └── ...
