@@ -6,7 +6,8 @@
 
 **PyEmbedBuilder**  is a user-friendly GUI for creating portable, open-source Python applications that you can share with other Windows users who don’t feel confident setting up a full Python environment themselves. It uses a .bat file to launch your (.py) Python app in a clear and secure way. It lunches as easily as any regular (.exe) executable software, but without the need to compile binary executables or pay hundreds of dollars to have your apps signed. It fully exposes the launcher and application source code to all end users, making it better suited for open for security audits open-source distribution rather than fully closed-source software. I’m simply sharing it with anyone interested, as I originally built this tool for my own use.
 
-<img width="1918" height="1006" alt="image" src="https://github.com/user-attachments/assets/00da8ebf-e6e2-4ebe-b65b-9545e789f0c4" />
+<img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/3371eb8a-36a2-4b3b-baa9-c8476d489b3f" />
+
 
 It automates the complex process of downloading embedded Python distributions, verifying their integrity, bootstrapping `pip`, installing dependencies, and securely extracting official components (like Tcl/Tk for Tkinter support) into a clean, portable folder structure.
 # [Direct Link to Download](https://github.com/Vinventive/PyEmbedBuilder/releases/download/v1.0.0-alpha/PyEmbedBuilder_v1.0.0-alpha.7z)
