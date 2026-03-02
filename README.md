@@ -10,7 +10,7 @@
 
 
 It automates the complex process of downloading embedded Python distributions, verifying their integrity, bootstrapping `pip`, installing dependencies, and securely extracting official components (like Tcl/Tk for Tkinter support) into a clean, portable folder structure.
-# [Direct Link to Download](https://github.com/Vinventive/PyEmbedBuilder/releases/download/v1.0.0-alpha/PyEmbedBuilder_v1.0.0-alpha.7z)
+# [Direct Link to Download](https://github.com/Vinventive/PyEmbedBuilder/releases/download/v1.0.0-beta/PyEmbedBuilder_v1.0.0-beta.7z)
 <img src="https://count.getloli.com/@PyEmbedBuilder?name=PyEmbedBuilder&theme=booru-lewd&padding=7&offset=0&align=top&scale=1.5&pixelated=1&darkmode=auto" />
 
 ---
