@@ -1,6 +1,6 @@
 # PyEmbedBuilder
 
-![Version](https://img.shields.io/badge/version-1.0.0_alpha-orange)
+![Version](https://img.shields.io/badge/version-1.0.0_beta-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows_10%2F11-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
