@@ -1,6 +1,6 @@
 # PyEmbedBuilder
 
-![Version](https://img.shields.io/badge/version-1.0.0_beta-orange)
+![Version](https://img.shields.io/badge/version-1.0.0-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows_10%2F11-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -29,7 +29,7 @@ Security is the core design principle of PyEmbedBuilder:
 
 *   **Wizard-Style Interface:** Modern, accessible Tkinter GUI with Dark/Light Mode, High Contrast Accessibility Mode and text scaling support.
 *   **Full Python Support:** 
-    *   Download any stable Python version (≥ 3.12.10).
+    *   Download any stable Python version.
     *   **Optional Component Extraction:** Automatically add `Scripts`, `tcl`, `Lib`, `libs`, and `include` folders—enabling full standard library support (including `tkinter`) in a portable embedded environment.
 *   **Dependency Management:** Import your `requirements.txt` to pre-install packages into the portable environment.
 *   **Portable Output:** 
