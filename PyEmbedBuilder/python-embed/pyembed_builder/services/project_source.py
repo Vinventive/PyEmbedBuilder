@@ -10,12 +10,9 @@ Supports:
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import os
-import stat
 import shutil
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -30,6 +27,7 @@ from ..util.paths import cache_dir
 from .downloader import download_file
 from .extractor import extract_zip
 from .subprocess_runner import run_command_stream
+from ._common import cache_key, rmtree_onerror, wipe_dir, reset_cache_dir
 
 
 LogCb = Callable[[str], None]
@@ -121,41 +119,6 @@ def _copy_tree(src: Path, dst: Path, *, log_cb: LogCb) -> int:
     return copied
 
 
-def _cache_key(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-
-
-def _rmtree_onerror(func, path: str, _exc_info) -> None:
-    try:
-        os.chmod(path, stat.S_IWRITE)
-    except Exception:
-        pass
-    try:
-        func(path)
-    except Exception:
-        pass
-
-
-def _wipe_dir(path: Path, *, retries: int = 4, delay_s: float = 0.12) -> None:
-    if not path.exists():
-        return
-    last_exc: Exception | None = None
-    for _ in range(retries):
-        try:
-            shutil.rmtree(path, onerror=_rmtree_onerror)
-            return
-        except Exception as exc:
-            last_exc = exc
-            time.sleep(delay_s)
-    if path.exists():
-        raise RuntimeError(f"Failed to remove directory: {path}") from last_exc
-
-
-def _reset_git_cache_dir(path: Path) -> None:
-    _wipe_dir(path)
-    path.mkdir(parents=True, exist_ok=True)
-
-
 def _prepare_from_git(
     *,
     url: str,
@@ -167,10 +130,10 @@ def _prepare_from_git(
     url = normalize_project_git_source(url)
     validate_project_source_url(url, "git")
 
-    key = _cache_key(f"{url}|{source_ref}")
+    key = cache_key(f"{url}|{source_ref}")
     work_root = cache_dir() / "sources" / "git" / key
     log_cb("Resetting cached Git source for this build attempt...")
-    _reset_git_cache_dir(work_root)
+    reset_cache_dir(work_root)
     clone_dir = work_root / "_clone"
 
     source_ref = source_ref.strip()
@@ -184,7 +147,7 @@ def _prepare_from_git(
             )
         except Exception:
             log_cb("Shallow ref clone failed; retrying full clone + checkout...")
-            _reset_git_cache_dir(work_root)
+            reset_cache_dir(work_root)
             run_command_stream(
                 ["git", "clone", url, str(clone_dir)],
                 log_cb=log_cb,
@@ -212,7 +175,7 @@ def _prepare_from_git(
             )
         except Exception:
             log_cb("Shallow clone failed; retrying full clone...")
-            _reset_git_cache_dir(work_root)
+            reset_cache_dir(work_root)
             run_command_stream(
                 ["git", "clone", url, str(clone_dir)],
                 log_cb=log_cb,
@@ -227,7 +190,7 @@ def _prepare_from_git(
 def _prepare_from_zip(*, url: str, env_dir: Path, log_cb: LogCb) -> tuple[str, int]:
     validate_project_source_url(url, "zip")
 
-    key = _cache_key(url)
+    key = cache_key(url)
     zip_cache_dir = cache_dir() / "sources" / "zip"
     zip_cache_dir.mkdir(parents=True, exist_ok=True)
     zip_path = zip_cache_dir / f"{key}.zip"

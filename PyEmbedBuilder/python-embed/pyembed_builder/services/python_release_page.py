@@ -39,10 +39,10 @@ def get_embeddable_info(version: Version, arch: str) -> PythonEmbeddableInfo:
     filename = f"python-{version}-embed-{arch}.zip"
     url = f"{_FTP_BASE}/{version}/{filename}"
 
-    audit("release_resolve", version=str(version), arch=arch)
-
     audit(
         "release_resolved",
+        version=str(version),
+        arch=arch,
         filename=filename,
         url=url,
     )

@@ -132,7 +132,10 @@ def run_command_stream(
     _validate_executable(args_list[0], allowed_exe_dir)
 
     cmd_display = " ".join(args_list)
-    audit("subprocess_start", command=cmd_display, cwd=str(cwd or "."))
+    cmd_log = cmd_display.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    if len(cmd_log) > 512:
+        cmd_log = cmd_log[:509] + "..."
+    audit("subprocess_start", command=cmd_log, cwd=str(cwd or "."))
     if log_cb:
         log_cb(f"$ {cmd_display}")
 
@@ -140,9 +143,12 @@ def run_command_stream(
         args_list,
         cwd=str(cwd) if cwd else None,
         env=env,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
 
@@ -205,13 +211,13 @@ def run_command_stream(
             recent_output.append(item)
 
     if timed_out:
-        audit("subprocess_timeout", command=cmd_display, timeout_s=str(timeout_s))
+        audit("subprocess_timeout", level="ERROR", command=cmd_log, timeout_s=str(timeout_s))
         raise RuntimeError(
             f"Command timed out after {timeout_s:.0f}s:\n{cmd_display}"
         )
 
     if cancelled:
-        audit("subprocess_cancelled", command=cmd_display)
+        audit("subprocess_cancelled", level="WARNING", command=cmd_log)
         raise CommandCancelled(f"Command cancelled by user:\n{cmd_display}")
 
     if proc.returncode != 0:
@@ -220,7 +226,8 @@ def run_command_stream(
             output_tail = "No process output captured."
         audit(
             "subprocess_failed",
-            command=cmd_display,
+            level="ERROR",
+            command=cmd_log,
             exit_code=str(proc.returncode),
         )
         raise RuntimeError(
@@ -228,5 +235,5 @@ def run_command_stream(
             f"Output tail:\n{output_tail}"
         )
 
-    audit("subprocess_ok", command=cmd_display)
+    audit("subprocess_ok", command=cmd_log)
     return CommandResult(args=args_list, returncode=proc.returncode)

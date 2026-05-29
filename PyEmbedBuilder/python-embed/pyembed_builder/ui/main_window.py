@@ -12,9 +12,10 @@ import shlex
 import subprocess
 import threading
 import time
+import traceback
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 from urllib.parse import urlparse
 
 from ..models import BuildPlan, StepUpdate
@@ -39,6 +40,7 @@ from ..ui.theme import (
     ScrollableFrame,
     SUCCESS_BANNER_SIZE,
     StepRow,
+    ThemedDialog,
     ThemeManager,
     Tooltip,
     UI_FONT,
@@ -46,6 +48,10 @@ from ..ui.theme import (
     WINDOW_DEFAULT_SIZE,
     WINDOW_MIN_SIZE,
     WizardStepBar,
+    themed_askyesno,
+    themed_showinfo,
+    themed_showerror,
+    themed_showwarning,
 )
 from ..util.paths import (
     APP_DATA_DIRNAME,
@@ -53,6 +59,14 @@ from ..util.paths import (
     logs_dir,
     output_base_dir,
     project_root,
+)
+from ..util.preferences import (
+    load_preferences,
+    save_preferences,
+    save_setup_config,
+    load_setup_config,
+    delete_setup_config,
+    list_setup_configs,
 )
 from ..util.versioning import Version
 
@@ -110,6 +124,16 @@ def _display_output_path(path: Path) -> str:
         return _rel_path(path)
 
 
+def _tooling_summary(tooling: dict) -> str:
+    labels: list[str] = []
+    if not isinstance(tooling, dict):
+        return "None"
+    ffmpeg = tooling.get("ffmpeg", {})
+    if isinstance(ffmpeg, dict) and ffmpeg.get("status") == "ok":
+        labels.append("FFmpeg")
+    return ", ".join(labels) if labels else "None"
+
+
 def _parse_manual_packages(raw: str) -> tuple[str, ...]:
     """Parse manual package input into pip-installable tokens."""
     if not raw.strip():
@@ -148,6 +172,82 @@ def _disable_button_focus_recursive(widget: tk.Widget) -> None:
         _disable_button_focus_recursive(child)
 
 
+def _ask_setup_name(
+    parent: tk.Tk,
+    *,
+    existing_names: list[str] | None = None,
+    initial: str = "",
+) -> str | None:
+    """Show a themed dialog prompting the user for a setup configuration name."""
+    dlg = ThemedDialog(
+        parent,
+        title="Save Setup Configuration",
+        min_width=440,
+        min_height=180,
+        resizable=False,
+    )
+    result: list[str | None] = [None]
+
+    body = ttk.Frame(dlg)
+    body.pack(fill="both", expand=True, padx=16, pady=(16, 0))
+    body.columnconfigure(0, weight=1)
+
+    ttk.Label(body, text="Configuration name:", style="Heading.TLabel").grid(
+        row=0, column=0, sticky="w", pady=(0, 6),
+    )
+    var = tk.StringVar(value=initial)
+    entry = ttk.Entry(body, textvariable=var, width=40)
+    entry.grid(row=1, column=0, sticky="ew")
+    entry.focus_set()
+    entry.select_range(0, "end")
+
+    if existing_names:
+        visible = [n for n in existing_names if not n.startswith("_")]
+        if visible:
+            ttk.Label(
+                body, text="Existing configurations:", style="Muted.TLabel",
+            ).grid(row=2, column=0, sticky="w", pady=(12, 4))
+
+            lb = tk.Listbox(body, height=min(6, len(visible)), width=40)
+            for n in visible:
+                lb.insert("end", f"  {n}")
+            lb.grid(row=3, column=0, sticky="ew")
+            dlg.theme_listbox(lb)
+
+            def _on_lb_select(_e=None) -> None:
+                sel = lb.curselection()
+                if sel:
+                    var.set(visible[int(sel[0])])
+
+            lb.bind("<<ListboxSelect>>", _on_lb_select)
+
+    def _ok() -> None:
+        name = var.get().strip()
+        if name:
+            result[0] = name
+        dlg.destroy()
+
+    btn_frame = ttk.Frame(dlg)
+    btn_frame.pack(fill="x", padx=16, pady=(12, 16))
+    btn_frame.columnconfigure(0, weight=1)
+
+    ttk.Label(btn_frame, text="", style="Muted.TLabel").grid(
+        row=0, column=0, sticky="w",
+    )
+    ttk.Button(
+        btn_frame, text="Cancel", command=dlg.destroy,
+    ).grid(row=0, column=1, sticky="e", padx=(0, 8))
+    ttk.Button(
+        btn_frame, text="Save", style="Accent.TButton", command=_ok,
+    ).grid(row=0, column=2, sticky="e")
+
+    entry.bind("<Return>", lambda _: _ok())
+    dlg.center_over_parent()
+
+    parent.wait_window(dlg)
+    return result[0]
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  Main Application Window
 # ══════════════════════════════════════════════════════════════════════════
@@ -157,7 +257,8 @@ class PyEmbedBuilderApp(tk.Tk):
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("PyEmbedBuilder \u2014 Secure Embedded Python Environment Manager")
+        self._prefs = load_preferences()
+        self.title("PyEmbedBuilder - Secure Embedded Python Environment Manager")
         self.minsize(*WINDOW_MIN_SIZE)
 
         # Centre on screen
@@ -165,12 +266,22 @@ class PyEmbedBuilderApp(tk.Tk):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h = WINDOW_DEFAULT_SIZE
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
+        saved_geo = self._prefs.get("window_geometry", "")
+        if saved_geo:
+            try:
+                self.geometry(saved_geo)
+            except Exception:
+                pass
 
         # ── Theme ─────────────────────────────────────────────────────
         self._theme = ThemeManager(self)
-        self.var_theme_mode = tk.StringVar(value=THEME_MODE_TO_LABEL["dark"])
-        self.var_text_scale = tk.DoubleVar(value=1.6)
-        self.var_text_size = tk.StringVar(value="Large")
+        self.var_theme_mode = tk.StringVar(
+            value=self._prefs.get("theme_mode", "Dark"),
+        )
+        _sizes = {"Small": 0.9, "Medium": 1.2, "Large": 1.6}
+        _saved_size = self._prefs.get("text_size", "Large")
+        self.var_text_scale = tk.DoubleVar(value=_sizes.get(_saved_size, 1.6))
+        self.var_text_size = tk.StringVar(value=_saved_size)
 
         # ── Build-state variables ─────────────────────────────────────
         self.var_project_mode = tk.StringVar(value="create")  # "create" | "import" | "git" | "zip"
@@ -180,19 +291,35 @@ class PyEmbedBuilderApp(tk.Tk):
         self.var_source_url = tk.StringVar(value="")
         self.var_source_ref = tk.StringVar(value="")
         self.var_entry_point = tk.StringVar(value="")
-        self.var_auto_analyze_source = tk.BooleanVar(value=True)
+        self.var_auto_analyze_source = tk.BooleanVar(
+            value=self._prefs.get("auto_analyze_source", True),
+        )
         self.var_source_analysis_status = tk.StringVar(value="Source analysis not run yet.")
         self.var_window_only = tk.BooleanVar(value=False)
+        self.var_create_desktop_shortcut = tk.BooleanVar(value=False)
+        self.var_create_start_menu_shortcut = tk.BooleanVar(value=False)
+        self.var_install_ffmpeg = tk.BooleanVar(value=False)
+        self.var_ffmpeg_arch = tk.StringVar(
+            value=self._prefs.get("ffmpeg_arch", "auto"),
+        )
         self.var_python_mode = tk.StringVar(value="recommended")
         self.var_python_version = tk.StringVar(value=str(DEFAULT_VERSION))
-        self.var_arch = tk.StringVar(value="amd64")
+        self.var_arch = tk.StringVar(
+            value=self._prefs.get("arch", "amd64"),
+        )
         self.var_use_requirements = tk.BooleanVar(value=False)
         self.var_requirements_path = tk.StringVar(value="")
         self.var_manual_packages = tk.StringVar(value="")
         self.var_dependency_no_deps = tk.BooleanVar(value=False)
-        self.var_auto_install_project = tk.BooleanVar(value=True)
-        self.var_use_pymanager_components = tk.BooleanVar(value=True)
-        self.var_clear_cache = tk.BooleanVar(value=True)
+        self.var_auto_install_project = tk.BooleanVar(
+            value=self._prefs.get("auto_install_project", True),
+        )
+        self.var_use_pymanager_components = tk.BooleanVar(
+            value=self._prefs.get("use_pymanager_components", True),
+        )
+        self.var_clear_cache = tk.BooleanVar(
+            value=self._prefs.get("clear_cache", True),
+        )
         self._target_custom = False
         self._suppress_target_trace = False
         self._last_text_size: str | None = None
@@ -222,6 +349,7 @@ class PyEmbedBuilderApp(tk.Tk):
         self.var_env_name.trace_add("write", self._on_env_name_change)
         self.var_target_dir.trace_add("write", self._on_target_dir_change)
         self.var_source_url.trace_add("write", self._on_source_url_change)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── helpers ────────────────────────────────────────────────────────
 
@@ -604,7 +732,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 return version
             fallback = resolve_embeddable_at_or_above(version, arch)
         except Exception as exc:
-            messagebox.showwarning(
+            themed_showwarning(self,
                 "Embeddable Version Check",
                 "Could not verify embeddable availability from python.org.\n"
                 f"Continuing with Python {version}.\n\nDetails: {exc}",
@@ -618,13 +746,227 @@ class PyEmbedBuilderApp(tk.Tk):
         if fallback != version:
             self.var_python_mode.set("custom")
             self.var_python_version.set(str(fallback))
-            self.pg_setup._sync_mode()
-            messagebox.showinfo(
+            self.pg_setup.sync_python_mode()
+            themed_showinfo(self,
                 "Python Version Updated",
                 f"Python {version} ({arch}) has no embeddable ZIP.\n"
                 f"Using the next higher embeddable version: {fallback}.",
             )
         return fallback
+
+    def _on_close(self) -> None:
+        """Handle window close - cancel running build first if needed."""
+        if self._build_state == "running":
+            if not themed_askyesno(self,
+                "Build Running",
+                "A build is currently running.\n\n"
+                "Cancel the build and close the application?",
+            ):
+                return
+            self._build_cancel.set()
+            if self._build_thread and self._build_thread.is_alive():
+                self._build_thread.join(timeout=3.0)
+        self._save_prefs()
+        self.destroy()
+
+    def _save_prefs(self) -> None:
+        """Persist user preferences to disk."""
+        try:
+            geo = self.geometry()
+        except Exception:
+            geo = ""
+        save_preferences({
+            "theme_mode": self.var_theme_mode.get(),
+            "text_size": self.var_text_size.get(),
+            "arch": self.var_arch.get(),
+            "project_mode": self.var_project_mode.get(),
+            "window_geometry": geo,
+            "ffmpeg_arch": self.var_ffmpeg_arch.get(),
+            "use_pymanager_components": self.var_use_pymanager_components.get(),
+            "clear_cache": self.var_clear_cache.get(),
+            "auto_analyze_source": self.var_auto_analyze_source.get(),
+            "auto_install_project": self.var_auto_install_project.get(),
+        })
+
+    def _show_about(self) -> None:
+        """Show application version and info in a themed dialog."""
+        from .. import __version__
+        dlg = ThemedDialog(
+            self,
+            title="About PyEmbedBuilder",
+            min_width=420,
+            min_height=240,
+            resizable=False,
+        )
+        c = dlg.colors
+        sc = dlg.scale
+
+        body = ttk.Frame(dlg)
+        body.pack(fill="both", expand=True, padx=24, pady=(20, 8))
+        body.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            body,
+            text=f"PyEmbedBuilder v{__version__}",
+            style="Heading.TLabel",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 4))
+
+        ttk.Label(
+            body,
+            text="Secure Embedded Python Environment Manager",
+            style="Secondary.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+        info_text = (
+            "Create fully portable, self-contained Python\n"
+            "environments for Windows - no system Python required.\n\n"
+            "All downloads are HTTPS-only with strict source policies.\n"
+            "Every download and build step is transparently\n"
+            "recorded in security_audit.log for your review."
+        )
+        ttk.Label(
+            body,
+            text=info_text,
+            wraplength=380,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w")
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(fill="x", padx=24, pady=(8, 20))
+        ttk.Button(
+            btn_frame, text="Close", style="Accent.TButton",
+            command=dlg.destroy,
+        ).pack(side="right")
+
+        dlg.center_over_parent()
+
+    # ── Setup configuration save / load ───────────────────────────────
+
+    def _capture_setup_fields(self) -> dict:
+        """Snapshot all setup form fields into a dict."""
+        return {
+            "project_mode": self.var_project_mode.get(),
+            "env_name": self.var_env_name.get(),
+            "target_dir": self.var_target_dir.get(),
+            "source_dir": self.var_source_dir.get(),
+            "source_url": self.var_source_url.get(),
+            "source_ref": self.var_source_ref.get(),
+            "entry_point": self.var_entry_point.get(),
+            "window_only": self.var_window_only.get(),
+            "create_desktop_shortcut": self.var_create_desktop_shortcut.get(),
+            "create_start_menu_shortcut": self.var_create_start_menu_shortcut.get(),
+            "install_ffmpeg": self.var_install_ffmpeg.get(),
+            "ffmpeg_arch": self.var_ffmpeg_arch.get(),
+            "python_mode": self.var_python_mode.get(),
+            "python_version": self.var_python_version.get(),
+            "arch": self.var_arch.get(),
+            "use_requirements": self.var_use_requirements.get(),
+            "requirements_path": self.var_requirements_path.get(),
+            "manual_packages": self.var_manual_packages.get(),
+            "dependency_no_deps": self.var_dependency_no_deps.get(),
+            "auto_install_project": self.var_auto_install_project.get(),
+            "auto_analyze_source": self.var_auto_analyze_source.get(),
+            "use_pymanager_components": self.var_use_pymanager_components.get(),
+            "clear_cache": self.var_clear_cache.get(),
+        }
+
+    def _restore_setup_fields(self, fields: dict) -> None:
+        """Restore all setup form fields from a saved configuration dict."""
+        def _s(var: tk.StringVar, key: str) -> None:
+            if key in fields:
+                var.set(str(fields[key]))
+
+        def _b(var: tk.BooleanVar, key: str) -> None:
+            if key in fields:
+                var.set(bool(fields[key]))
+
+        self._suppress_target_trace = True
+        try:
+            _s(self.var_project_mode, "project_mode")
+            _s(self.var_env_name, "env_name")
+            _s(self.var_target_dir, "target_dir")
+            _s(self.var_source_dir, "source_dir")
+            _s(self.var_source_url, "source_url")
+            _s(self.var_source_ref, "source_ref")
+            _s(self.var_entry_point, "entry_point")
+            _b(self.var_window_only, "window_only")
+            _b(self.var_create_desktop_shortcut, "create_desktop_shortcut")
+            _b(self.var_create_start_menu_shortcut, "create_start_menu_shortcut")
+            _b(self.var_install_ffmpeg, "install_ffmpeg")
+            _s(self.var_ffmpeg_arch, "ffmpeg_arch")
+            _s(self.var_python_mode, "python_mode")
+            _s(self.var_python_version, "python_version")
+            _s(self.var_arch, "arch")
+            _b(self.var_use_requirements, "use_requirements")
+            _s(self.var_requirements_path, "requirements_path")
+            _s(self.var_manual_packages, "manual_packages")
+            _b(self.var_dependency_no_deps, "dependency_no_deps")
+            _b(self.var_auto_install_project, "auto_install_project")
+            _b(self.var_auto_analyze_source, "auto_analyze_source")
+            _b(self.var_use_pymanager_components, "use_pymanager_components")
+            _b(self.var_clear_cache, "clear_cache")
+        finally:
+            self._suppress_target_trace = False
+
+        self._target_custom = bool(fields.get("target_dir", ""))
+        self._env_name_user_modified = True
+        self._clear_source_analysis()
+        self.pg_setup.sync_python_mode()
+        self.pg_setup.sync_dependency_ui()
+        self.pg_setup.sync_shortcut_ui()
+        self.pg_setup.sync_tooling_ui()
+        self.pg_setup._sync_project_mode()
+
+    def save_setup_as(self) -> None:
+        """Prompt the user for a name and save the current setup configuration."""
+        existing = list_setup_configs()
+        name = _ask_setup_name(self, existing_names=existing)
+        if not name:
+            return
+        try:
+            fields = self._capture_setup_fields()
+            save_setup_config(name, fields)
+            themed_showinfo(self,
+                "Setup Saved",
+                f"Configuration saved as: {name}",
+            )
+            self.pg_setup._refresh_setup_list()
+        except Exception as exc:
+            themed_showerror(self, "Save Failed", str(exc))
+
+    def load_setup_from(self, name: str) -> None:
+        """Load a named setup configuration into the form."""
+        try:
+            fields = load_setup_config(name)
+        except Exception as exc:
+            themed_showerror(self, "Load Failed", str(exc))
+            return
+        self._restore_setup_fields(fields)
+        self.var_source_analysis_status.set(
+            f"Loaded configuration: {name}. Source analysis will re-run on next review."
+        )
+
+    def delete_setup(self, name: str) -> None:
+        """Delete a named setup configuration after confirmation."""
+        if not themed_askyesno(self,
+            "Delete Configuration",
+            f"Delete saved setup configuration \"{name}\"?",
+        ):
+            return
+        try:
+            delete_setup_config(name)
+            self.pg_setup._refresh_setup_list()
+        except Exception as exc:
+            themed_showerror(self, "Delete Failed", str(exc))
+
+    def _auto_save_setup(self, label: str) -> None:
+        """Silently auto-save the current setup after a successful build."""
+        try:
+            fields = self._capture_setup_fields()
+            save_setup_config(label, fields)
+            self.pg_setup._refresh_setup_list()
+        except Exception:
+            pass
 
     # ── Layout ────────────────────────────────────────────────────────
 
@@ -669,6 +1011,11 @@ class PyEmbedBuilderApp(tk.Tk):
         self.size_cb.grid(row=0, column=3, padx=(0, 4))
         self.size_cb.bind("<<ComboboxSelected>>", self._on_text_size_selected)
         Tooltip(self.size_cb, "Choose small, medium, or large text size")
+
+        about_btn = ttk.Button(
+            ctrl, text="About", command=self._show_about,
+        )
+        about_btn.grid(row=0, column=4, padx=(12, 0))
 
         # ── Step bar ──────────────────────────────────────────────────
         self.step_bar = WizardStepBar(outer, WIZARD_STEPS, self._theme)
@@ -716,11 +1063,13 @@ class PyEmbedBuilderApp(tk.Tk):
             "Continue to the next step. On Setup, this generates the review plan.",
         )
 
+        self.bind_all("<Control-Return>", lambda _: self._on_next())
+        self.bind_all("<Escape>", lambda _: self._on_escape())
+
         self._show_page(0)
 
     def _refresh_header_dropdown_theme(self) -> None:
         """Refresh top-bar combobox widget and popup colors after theme changes."""
-        c = self._theme.colors
         entry_font = (UI_FONT, max(9, int(round(10 * self._theme.scale))))
         for cb in (getattr(self, "theme_cb", None), getattr(self, "size_cb", None)):
             if not isinstance(cb, ttk.Combobox):
@@ -730,20 +1079,7 @@ class PyEmbedBuilderApp(tk.Tk):
             except Exception:
                 pass
             self.after_idle(lambda widget=cb: self._clear_combobox_selection(widget))
-            try:
-                popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
-                listbox = f"{popdown}.f.l"
-                cb.tk.call(
-                    listbox,
-                    "configure",
-                    "-background", c["entry_bg"],
-                    "-foreground", c["fg"],
-                    "-selectbackground", c["accent"],
-                    "-selectforeground", c["accent_fg"],
-                )
-            except Exception:
-                # Popdown may not exist yet; it will inherit defaults when first opened.
-                pass
+            self._theme.theme_combobox_popdown(cb, entry_font=entry_font)
 
     # ── Navigation ────────────────────────────────────────────────────
 
@@ -793,6 +1129,8 @@ class PyEmbedBuilderApp(tk.Tk):
                 else:
                     self.lbl_footer.configure(text="Ready to run build.")
         elif idx == 3:  # Complete
+            self.btn_back.configure(text="\u2190  Setup")
+            self.btn_back.grid(row=0, column=1, sticky="e", padx=(0, 8))
             self.btn_next.configure(text="Build Another")
             self.btn_next.grid(row=0, column=2, sticky="e")
             self.lbl_footer.configure(text="Environment ready.")
@@ -816,6 +1154,15 @@ class PyEmbedBuilderApp(tk.Tk):
             self._show_page(0)
         elif self._current_page == 2 and self._build_state != "running":
             self._show_page(1)
+        elif self._current_page == 3:
+            self._show_page(0)
+
+    def _on_escape(self) -> None:
+        """Handle Escape key - cancel build if running, else go back."""
+        if self._build_state == "running":
+            self.cancel_build()
+        elif self._current_page > 0:
+            self._on_back()
 
     # ── Build actions ─────────────────────────────────────────────────
 
@@ -848,7 +1195,7 @@ class PyEmbedBuilderApp(tk.Tk):
     def browse_entry_point(self) -> None:
         mode = self.var_project_mode.get()
         if mode in {"git", "zip"}:
-            messagebox.showinfo(
+            themed_showinfo(self,
                 "Entry Point",
                 "For Git/ZIP sources, enter the entry-point path manually "
                 "(for example: main.py or src\\app.py), or leave it blank "
@@ -859,7 +1206,7 @@ class PyEmbedBuilderApp(tk.Tk):
         if mode == "import":
             src_raw = self.var_source_dir.get().strip()
             if not src_raw:
-                messagebox.showwarning(
+                themed_showwarning(self,
                     "Source Folder Required",
                     "Select a local source folder first.",
                 )
@@ -902,7 +1249,7 @@ class PyEmbedBuilderApp(tk.Tk):
             self.var_python_mode.set("custom")
             self.var_python_version.set(str(dlg.selected_version))
             # Keep version field editable when user chooses custom mode via dialog.
-            self.pg_setup._sync_mode()
+            self.pg_setup.sync_python_mode()
 
     def _validate_setup(self) -> BuildPlan | None:
         mode = self.var_project_mode.get().strip().lower()
@@ -914,13 +1261,13 @@ class PyEmbedBuilderApp(tk.Tk):
         try:
             env_name = sanitize_env_name(raw_name)
         except ValueError as e:
-            messagebox.showerror("Invalid environment name", str(e))
+            themed_showerror(self, "Invalid environment name", str(e))
             return None
 
         # Output directory
         target = self.var_target_dir.get().strip()
         if not target:
-            messagebox.showerror(
+            themed_showerror(self,
                 "Missing location",
                 "Please choose an output location for the portable environment.",
             )
@@ -943,7 +1290,7 @@ class PyEmbedBuilderApp(tk.Tk):
 
         # Warn if target exists
         if target_dir.exists() and any(target_dir.iterdir()):
-            ok = messagebox.askyesno(
+            ok = themed_askyesno(self,
                 "Folder not empty",
                 f"The folder already exists and is not empty:\n{target_dir}\n\n"
                 "Contents may be overwritten. Continue?",
@@ -960,7 +1307,7 @@ class PyEmbedBuilderApp(tk.Tk):
         if mode == "import":
             source_raw = self.var_source_dir.get().strip()
             if not source_raw:
-                messagebox.showerror(
+                themed_showerror(self,
                     "Missing source folder",
                     "Please select an existing local project folder to import.",
                 )
@@ -972,7 +1319,7 @@ class PyEmbedBuilderApp(tk.Tk):
             if not source_path.is_absolute():
                 source_path = project_root() / source_path
             if not source_path.exists() or not source_path.is_dir():
-                messagebox.showerror(
+                themed_showerror(self,
                     "Project folder not found",
                     f"The selected source folder does not exist:\n{source_path}",
                 )
@@ -986,7 +1333,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 except ValueError:
                     pass
                 else:
-                    messagebox.showerror(
+                    themed_showerror(self,
                         "Invalid output location",
                         "Output folder cannot be inside the source project folder.",
                     )
@@ -996,7 +1343,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 except ValueError:
                     pass
                 else:
-                    messagebox.showerror(
+                    themed_showerror(self,
                         "Invalid output location",
                         "Source project folder cannot be inside the output folder.",
                     )
@@ -1004,7 +1351,7 @@ class PyEmbedBuilderApp(tk.Tk):
         elif mode in {"git", "zip"}:
             source_url_input = self.var_source_url.get().strip()
             if not source_url_input:
-                messagebox.showerror(
+                themed_showerror(self,
                     "Missing source URL",
                     "Please enter the repository/ZIP URL for your project source.",
                 )
@@ -1020,7 +1367,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 try:
                     source_url = normalize_project_git_source(source_url)
                 except ValueError as e:
-                    messagebox.showerror("Invalid source URL", str(e))
+                    themed_showerror(self, "Invalid source URL", str(e))
                     return None
                 self.var_source_url.set(source_url)
             else:
@@ -1028,7 +1375,7 @@ class PyEmbedBuilderApp(tk.Tk):
             try:
                 validate_project_source_url(source_url, mode)
             except ValueError as e:
-                messagebox.showerror("Invalid source URL", str(e))
+                themed_showerror(self, "Invalid source URL", str(e))
                 return None
 
         if mode == "create":
@@ -1045,7 +1392,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 )
             except Exception as exc:
                 self.var_source_analysis_status.set(f"Source analysis failed: {exc}")
-                messagebox.showwarning(
+                themed_showwarning(self,
                     "Source Analysis Failed",
                     "Could not analyze source metadata before build.\n"
                     f"Continuing with manual settings.\n\nDetails: {exc}",
@@ -1059,7 +1406,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 ):
                     self.var_requirements_path.set(_to_relative(str(analysis.requirements_file)))
                     self.var_use_requirements.set(True)
-                    self.pg_setup._toggle_deps()
+                    self.pg_setup.sync_dependency_ui()
                 if (
                     analysis.suggested_python is not None
                     and analysis.requested_python is not None
@@ -1067,7 +1414,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 ):
                     self.var_python_mode.set("custom")
                     self.var_python_version.set(str(analysis.suggested_python))
-                    self.pg_setup._sync_mode()
+                    self.pg_setup.sync_python_mode()
         else:
             self._source_analysis = None
             self._source_analysis_key = ""
@@ -1083,7 +1430,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 try:
                     entry_rel = entry_p.resolve().relative_to(entry_base.resolve())
                 except Exception:
-                    messagebox.showerror(
+                    themed_showerror(self,
                         "Invalid entry point",
                         "Entry point must be inside the selected project source/output folder.",
                     )
@@ -1091,13 +1438,13 @@ class PyEmbedBuilderApp(tk.Tk):
             else:
                 entry_rel = entry_p
             if entry_rel.is_absolute() or ".." in entry_rel.parts:
-                messagebox.showerror(
+                themed_showerror(self,
                     "Invalid entry point",
                     "Entry point must be a safe relative path inside your project folder.",
                 )
                 return None
             if entry_rel.suffix.lower() != ".py":
-                messagebox.showerror(
+                themed_showerror(self,
                     "Invalid entry point",
                     "Entry point must be a .py file.",
                 )
@@ -1107,13 +1454,13 @@ class PyEmbedBuilderApp(tk.Tk):
             try:
                 entry_abs.relative_to(entry_base.resolve())
             except Exception:
-                messagebox.showerror(
+                themed_showerror(self,
                     "Invalid entry point",
                     "Entry point resolves outside your selected source/output folder.",
                 )
                 return None
             if entry_abs.exists() and not entry_abs.is_file():
-                messagebox.showerror(
+                themed_showerror(self,
                     "Invalid entry point",
                     "Entry point path exists but is not a file.",
                 )
@@ -1126,7 +1473,7 @@ class PyEmbedBuilderApp(tk.Tk):
         try:
             version = Version.parse(self.var_python_version.get().strip())
         except ValueError:
-            messagebox.showerror(
+            themed_showerror(self,
                 "Invalid version",
                 "Python version must be in X.Y.Z format, for example 3.7.9 or 3.13.2.",
             )
@@ -1136,7 +1483,7 @@ class PyEmbedBuilderApp(tk.Tk):
         try:
             version = self._resolve_embeddable_version(version, arch)
         except ValueError as exc:
-            messagebox.showerror("Unsupported Python Version", str(exc))
+            themed_showerror(self, "Unsupported Python Version", str(exc))
             return None
 
         # Requirements
@@ -1154,7 +1501,7 @@ class PyEmbedBuilderApp(tk.Tk):
                 candidates.append(project_root() / p)
                 p = next((c for c in candidates if c.exists()), candidates[-1])
             if not p.exists() or not p.is_file():
-                messagebox.showerror(
+                themed_showerror(self,
                     "File not found",
                     "The selected requirements.txt does not exist.",
                 )
@@ -1167,7 +1514,20 @@ class PyEmbedBuilderApp(tk.Tk):
                 self.var_manual_packages.get().strip()
             )
         except ValueError as e:
-            messagebox.showerror("Invalid package list", str(e))
+            themed_showerror(self, "Invalid package list", str(e))
+            return None
+
+        ffmpeg_arch = self.var_ffmpeg_arch.get().strip().lower()
+        if ffmpeg_arch not in {"auto", "x64", "x86"}:
+            ffmpeg_arch = "auto"
+            self.var_ffmpeg_arch.set(ffmpeg_arch)
+        if self.var_install_ffmpeg.get() and ffmpeg_arch == "x86":
+            themed_showerror(
+                self,
+                "FFmpeg x86 unavailable",
+                "The selected gyan.dev FFmpeg source currently publishes "
+                "64-bit Windows builds only. Choose auto or x64.",
+            )
             return None
 
         return BuildPlan(
@@ -1179,6 +1539,10 @@ class PyEmbedBuilderApp(tk.Tk):
             source_ref=source_ref,
             entry_point_rel=entry_rel_s,
             window_only=self.var_window_only.get(),
+            create_desktop_shortcut=self.var_create_desktop_shortcut.get(),
+            create_start_menu_shortcut=self.var_create_start_menu_shortcut.get(),
+            install_ffmpeg=self.var_install_ffmpeg.get(),
+            ffmpeg_arch=ffmpeg_arch,
             version=version,
             arch=arch,
             dependency_no_deps=self.var_dependency_no_deps.get(),
@@ -1191,7 +1555,7 @@ class PyEmbedBuilderApp(tk.Tk):
 
     def _start_build(self) -> None:
         if self._build_thread and self._build_thread.is_alive():
-            messagebox.showinfo("Busy", "A build is already running.")
+            themed_showinfo(self, "Busy", "A build is already running.")
             return
 
         plan = self._current_plan
@@ -1224,7 +1588,8 @@ class PyEmbedBuilderApp(tk.Tk):
             except CancelledError as e:
                 self._ui_queue.put(("cancelled", str(e)))
             except Exception as e:
-                self._ui_queue.put(("error", str(e)))
+                tb = traceback.format_exc()
+                self._ui_queue.put(("error", (str(e), tb)))
 
         self._build_thread = threading.Thread(target=_worker, daemon=True)
         self._build_thread.start()
@@ -1249,6 +1614,9 @@ class PyEmbedBuilderApp(tk.Tk):
                     self._build_result = payload
                     self.pg_build.on_done(payload)
                     self.pg_complete.set_result(payload)
+                    env_name = getattr(self._current_plan, "env_name", "")
+                    if env_name:
+                        self._auto_save_setup(env_name)
                     self._show_page(3)
                 elif kind == "cancelled":
                     self._build_state = "cancelled"
@@ -1256,20 +1624,58 @@ class PyEmbedBuilderApp(tk.Tk):
                     self._update_nav()
                 elif kind == "error":
                     self._build_state = "failed"
-                    self.pg_build.on_error(payload)
+                    msg, tb = payload if isinstance(payload, tuple) else (str(payload), "")
+                    self.pg_build.on_error(msg, tb)
                     self._update_nav()
         except queue.Empty:
             pass
 
         if self._build_thread and self._build_thread.is_alive():
             self.after(80, self._poll_queue)
+        elif self._build_state == "running":
+            try:
+                while True:
+                    kind, payload = self._ui_queue.get_nowait()
+                    if kind == "done":
+                        self._build_state = "succeeded"
+                        self._build_result = payload
+                        self.pg_build.on_done(payload)
+                        self.pg_complete.set_result(payload)
+                        env_name = getattr(self._current_plan, "env_name", "")
+                        if env_name:
+                            self._auto_save_setup(env_name)
+                        self._show_page(3)
+                        return
+                    elif kind == "cancelled":
+                        self._build_state = "cancelled"
+                        self.pg_build.on_cancelled(payload)
+                        self._update_nav()
+                        return
+                    elif kind == "error":
+                        self._build_state = "failed"
+                        msg, tb = payload if isinstance(payload, tuple) else (str(payload), "")
+                        self.pg_build.on_error(msg, tb)
+                        self._update_nav()
+                        return
+                    elif kind == "step":
+                        self.pg_build.on_step_update(payload)
+                    elif kind == "log":
+                        self.pg_build.on_log(payload)
+            except queue.Empty:
+                pass
+            if self._build_state == "running":
+                self._build_state = "failed"
+                self.pg_build.on_error(
+                    "Build thread exited unexpectedly without reporting a result.", ""
+                )
+                self._update_nav()
 
     def open_env_folder(self) -> None:
         if not self._build_result:
             return
         folder = Path(self._build_result.env_dir).resolve()
         if not folder.exists():
-            messagebox.showerror("Error", f"Folder not found:\n{folder}")
+            themed_showerror(self, "Error", f"Folder not found:\n{folder}")
             return
         if not folder.is_dir():
             folder = folder.parent
@@ -1279,17 +1685,17 @@ class PyEmbedBuilderApp(tk.Tk):
             explorer_exe = str(explorer) if explorer.exists() else "explorer.exe"
             subprocess.Popen([explorer_exe, str(folder)])
         except Exception:
-            messagebox.showerror("Error", "Could not open the folder.")
+            themed_showerror(self, "Error", "Could not open the folder.")
 
     def open_audit_log(self) -> None:
         log_path = logs_dir() / "security_audit.log"
         if not log_path.exists():
-            messagebox.showwarning("Audit Log", "No security audit log found yet.")
+            themed_showwarning(self, "Audit Log", "No security audit log found yet.")
             return
         try:
             os.startfile(str(log_path))  # type: ignore[attr-defined]
         except Exception:
-            messagebox.showerror("Error", "Could not open security_audit.log.")
+            themed_showerror(self, "Error", "Could not open security_audit.log.")
 
     def export_env_zip(self) -> None:
         if not self._build_result:
@@ -1308,9 +1714,9 @@ class PyEmbedBuilderApp(tk.Tk):
         try:
             zip_path = export_portable_zip(env_dir, Path(out))
         except Exception as exc:
-            messagebox.showerror("Export Failed", str(exc))
+            themed_showerror(self, "Export Failed", str(exc))
             return
-        messagebox.showinfo("Export Complete", f"Portable ZIP created:\n{zip_path}")
+        themed_showinfo(self, "Export Complete", f"Portable ZIP created:\n{zip_path}")
 
     def _reset_for_new_build(self) -> None:
         self._target_custom = False
@@ -1325,6 +1731,10 @@ class PyEmbedBuilderApp(tk.Tk):
         self.var_auto_analyze_source.set(True)
         self.var_source_analysis_status.set("Source analysis not run yet.")
         self.var_window_only.set(False)
+        self.var_create_desktop_shortcut.set(False)
+        self.var_create_start_menu_shortcut.set(False)
+        self.var_install_ffmpeg.set(False)
+        self.var_ffmpeg_arch.set("auto")
         self.var_python_mode.set("recommended")
         self.var_python_version.set(str(DEFAULT_VERSION))
         self.var_use_requirements.set(False)
@@ -1334,14 +1744,14 @@ class PyEmbedBuilderApp(tk.Tk):
         self.var_auto_install_project.set(True)
         self.var_use_pymanager_components.set(True)
         self.var_clear_cache.set(True)
-        self.var_text_size.set("Large")
-        self._apply_text_size()
         self._build_result = None
         self._build_state = "idle"
         self._current_plan = None
         self._source_analysis = None
         self._source_analysis_key = ""
         self.step_bar.reset()
+        self.pg_setup.sync_shortcut_ui()
+        self.pg_setup.sync_tooling_ui()
         self._show_page(0)
 
 
@@ -1553,6 +1963,7 @@ class _SetupPage(ttk.Frame):
             env,
             text="Window-only launch mode (pythonw.exe, no console window)",
             variable=self.app.var_window_only,
+            command=self._sync_shortcut_ui,
             style="Card.TCheckbutton",
             takefocus=False,
         )
@@ -1561,6 +1972,36 @@ class _SetupPage(ttk.Frame):
             self._window_chk,
             "Enabled: launch.bat uses pythonw.exe and exits immediately.\n"
             "Disabled: launch.bat uses python.exe for console debugging output.",
+        )
+
+        self._desktop_shortcut_chk = ttk.Checkbutton(
+            env,
+            text="Create Desktop launch shortcut (Windows 10/11)",
+            variable=self.app.var_create_desktop_shortcut,
+            style="Card.TCheckbutton",
+            takefocus=False,
+        )
+        self._desktop_shortcut_chk.grid(
+            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0),
+        )
+        Tooltip(
+            self._desktop_shortcut_chk,
+            "Creates a current-user Desktop .lnk using the selected launch mode.",
+        )
+
+        self._start_menu_shortcut_chk = ttk.Checkbutton(
+            env,
+            text="Create Start Menu launch shortcut (Windows 10/11)",
+            variable=self.app.var_create_start_menu_shortcut,
+            style="Card.TCheckbutton",
+            takefocus=False,
+        )
+        self._start_menu_shortcut_chk.grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(6, 0),
+        )
+        Tooltip(
+            self._start_menu_shortcut_chk,
+            "Creates a current-user Start Menu shortcut in Programs.",
         )
 
         # -- Python version card ------------------------------------------
@@ -1745,8 +2186,87 @@ class _SetupPage(ttk.Frame):
             "Security audit logs are kept.",
         )
 
+        # -- Optional tooling card --------------------------------------
+        tooling = ttk.LabelFrame(body, text="  Optional Tooling  ", padding=(16, 12))
+        tooling.pack(fill="x", pady=(0, 10))
+        tooling.columnconfigure(1, weight=1)
+
+        chk_ffmpeg = ttk.Checkbutton(
+            tooling,
+            text="Install FFmpeg release essentials from gyan.dev",
+            variable=self.app.var_install_ffmpeg,
+            command=self._sync_tooling_ui,
+            style="Card.TCheckbutton",
+            takefocus=False,
+        )
+        chk_ffmpeg.grid(row=0, column=0, columnspan=3, sticky="w")
+        Tooltip(
+            chk_ffmpeg,
+            "Downloads ffmpeg-release-essentials.zip from gyan.dev, fetches "
+            "its .sha256 file, verifies the SHA256 hash, and installs it under tools\\ffmpeg.",
+        )
+
+        ttk.Label(tooling, text="FFmpeg arch:", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(8, 0),
+        )
+        self._ffmpeg_arch_cb = ttk.Combobox(
+            tooling,
+            textvariable=self.app.var_ffmpeg_arch,
+            values=("auto", "x64", "x86"),
+            state="readonly",
+            width=12,
+        )
+        self._ffmpeg_arch_cb.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=(8, 0))
+        Tooltip(
+            self._ffmpeg_arch_cb,
+            "auto and x64 use the current gyan.dev Windows build. x86 is shown "
+            "for configuration clarity, but gyan.dev currently publishes 64-bit builds only.",
+        )
+
+        # -- Setup configurations card ------------------------------------
+        cfg = ttk.LabelFrame(body, text="  Setup Configurations  ", padding=(16, 12))
+        cfg.pack(fill="x", pady=(0, 10))
+        cfg.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            cfg,
+            text="Save and load complete setup configurations. Configurations are "
+            "also auto-saved after each successful build.",
+            style="CardMuted.TLabel",
+            wraplength=CONTENT_WRAP_WIDTH,
+        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+
+        self._cfg_combo = ttk.Combobox(cfg, state="readonly", width=36)
+        self._cfg_combo.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        Tooltip(
+            self._cfg_combo,
+            "Select a saved configuration to load or delete.",
+        )
+
+        load_btn = ttk.Button(
+            cfg, text="Load", command=self._on_load_setup,
+        )
+        load_btn.grid(row=1, column=1, padx=(0, 4))
+        Tooltip(load_btn, "Load the selected configuration into the setup form.")
+
+        save_btn = ttk.Button(
+            cfg, text="Save As...", command=self.app.save_setup_as,
+        )
+        save_btn.grid(row=1, column=2, padx=(0, 4))
+        Tooltip(save_btn, "Save the current setup form as a named configuration.")
+
+        del_btn = ttk.Button(
+            cfg, text="Delete", command=self._on_delete_setup,
+        )
+        del_btn.grid(row=1, column=3)
+        Tooltip(del_btn, "Delete the selected saved configuration.")
+
+        self._refresh_setup_list()
+
         self._toggle_deps()
         self._sync_mode()
+        self._sync_shortcut_ui()
+        self._sync_tooling_ui()
         self._sync_project_mode()
 
     def _toggle_deps(self) -> None:
@@ -1762,6 +2282,14 @@ class _SetupPage(ttk.Frame):
         else:
             self._ver_entry.configure(state="normal")
 
+    def _sync_shortcut_ui(self) -> None:
+        self._desktop_shortcut_chk.configure(state="normal")
+        self._start_menu_shortcut_chk.configure(state="normal")
+
+    def _sync_tooling_ui(self) -> None:
+        ffmpeg_state = "readonly" if self.app.var_install_ffmpeg.get() else "disabled"
+        self._ffmpeg_arch_cb.configure(state=ffmpeg_state)
+
     def _on_toggle_auto_analysis(self) -> None:
         if not self.app.var_auto_analyze_source.get():
             self.app.var_source_analysis_status.set("Source analysis disabled.")
@@ -1770,6 +2298,52 @@ class _SetupPage(ttk.Frame):
             self.app.var_source_analysis_status.set("Create mode has no source metadata to analyze.")
         else:
             self.app.var_source_analysis_status.set("Source analysis will run before review/build.")
+
+    def sync_python_mode(self) -> None:
+        """Public: synchronize Python version UI with current mode."""
+        self._sync_mode()
+
+    def sync_dependency_ui(self) -> None:
+        """Public: synchronize dependency file UI with current checkbox state."""
+        self._toggle_deps()
+
+    def sync_shortcut_ui(self) -> None:
+        """Public: synchronize shortcut checkboxes with launch mode."""
+        self._sync_shortcut_ui()
+
+    def sync_tooling_ui(self) -> None:
+        """Public: synchronize optional tooling controls."""
+        self._sync_tooling_ui()
+
+    def _refresh_setup_list(self) -> None:
+        """Reload the setup configuration combobox from disk."""
+        try:
+            names = list_setup_configs()
+            visible = [n for n in names if not n.startswith("_")]
+        except Exception:
+            visible = []
+        self._cfg_combo["values"] = tuple(visible)
+        if visible:
+            self._cfg_combo.set(visible[0])
+        else:
+            self._cfg_combo.set("")
+
+    def _on_load_setup(self) -> None:
+        """Load the selected setup configuration into the form."""
+        name = self._cfg_combo.get().strip()
+        if not name:
+            themed_showinfo(self.app, "Load Setup", "No configuration selected.")
+            return
+        self.app.load_setup_from(name)
+        self._refresh_setup_list()
+
+    def _on_delete_setup(self) -> None:
+        """Delete the selected setup configuration."""
+        name = self._cfg_combo.get().strip()
+        if not name:
+            themed_showinfo(self.app, "Delete Setup", "No configuration selected.")
+            return
+        self.app.delete_setup(name)
 
     def _sync_project_mode(self) -> None:
         mode = self.app.var_project_mode.get()
@@ -1899,6 +2473,19 @@ class _ReviewPage(ttk.Frame):
             if plan.window_only
             else "Console debug (python.exe)"
         )
+        shortcuts_label = "None"
+        shortcuts: list[str] = []
+        if plan.create_desktop_shortcut:
+            shortcuts.append("Desktop")
+        if plan.create_start_menu_shortcut:
+            shortcuts.append("Start Menu")
+        if shortcuts:
+            shortcuts_label = ", ".join(shortcuts)
+        ffmpeg_label = (
+            f"Yes ({'x64' if plan.ffmpeg_arch == 'auto' else plan.ffmpeg_arch})"
+            if plan.install_ffmpeg
+            else "No"
+        )
         dep_mode = (
             "Direct only (--no-deps)"
             if plan.dependency_no_deps
@@ -1917,6 +2504,8 @@ class _ReviewPage(ttk.Frame):
             f"Output:                {_display_output_path(plan.target_dir)}\n"
             f"Entry point:         {entry_label}\n"
             f"Launch mode:       {launch_mode}\n"
+            f"Shortcuts:          {shortcuts_label}\n"
+            f"FFmpeg:             {ffmpeg_label}\n"
             f"Dependency mode: {dep_mode}\n"
             f"Python:                  {plan.version} ({plan.arch})\n"
             f"Requirements:       {req_name}\n"
@@ -1930,6 +2519,7 @@ class _ReviewPage(ttk.Frame):
             "\u2713  HTTPS enforced on all downloads (TLS 1.2+)\n"
             "\u2713  Trusted source policies enforced for python.org, get-pip, and project hosts\n"
             "\u2713  Optional per-version MSI extraction from python.org\n"
+            "\u2713  Optional FFmpeg download verifies SHA256 before extraction\n"
             "\u2713  ZIP extraction validated against path traversal (zip-slip)\n"
             "\u2713  Download size limits enforced (500 MB max)\n"
             "\u2713  Subprocess execution sandboxed (no shell, timeout + cancel support)\n"
@@ -1971,8 +2561,16 @@ class _ReviewPage(ttk.Frame):
             steps.append("8.   Install dependencies  (skipped)")
         steps.append("9.   Verify environment (import site, pip)")
         steps.append("10. Smoke-test launch target")
-        steps.append("11. Create launch.bat, dependency scripts, and entry-point updater")
-        steps.append("12. Write README_portable.txt + EMBEDDED_PYTHON_CONFIGURATION.md")
+        if plan.install_ffmpeg:
+            steps.append("11. Install optional FFmpeg tooling with SHA256 verification")
+        else:
+            steps.append("11. Optional FFmpeg tooling  (skipped)")
+        steps.append("12. Create launch.bat, dependency scripts, and entry-point updater")
+        if shortcuts:
+            steps.append("13. Create Windows 10/11 launch shortcuts")
+        else:
+            steps.append("13. Windows launch shortcuts  (skipped)")
+        steps.append("14. Write README_portable.txt + EMBEDDED_PYTHON_CONFIGURATION.md")
 
         self._lbl_steps.configure(text="\n".join(steps))
 
@@ -1996,7 +2594,9 @@ class _BuildPage(ttk.Frame):
         ("reqs",      "Install dependencies"),
         ("verify",    "Verify environment"),
         ("smoke",     "Smoke-test launch target"),
+        ("tooling",   "Install optional tools"),
         ("launcher",  "Create launcher scripts"),
+        ("shortcuts", "Create Windows shortcuts"),
         ("guide",     "Write portable guides"),
     ]
 
@@ -2141,7 +2741,7 @@ class _BuildPage(ttk.Frame):
         self._progress["value"] = 100
         self._prog_label.configure(text="Complete")
         self._append_log(f"\n\u2713 Build completed: {_display_output_path(result.env_dir)}\n")
-        self._set_log_actions_enabled(False)
+        self._set_log_actions_enabled(True)
 
     def on_cancelled(self, msg: str) -> None:
         self._progress.stop()
@@ -2150,16 +2750,18 @@ class _BuildPage(ttk.Frame):
         pct = int(float(self._progress["value"]))
         self._prog_label.configure(text=f"{pct}%  (Cancelled)")
         self._set_log_actions_enabled(True)
-        messagebox.showwarning("Build Cancelled", msg)
+        themed_showwarning(self.app, "Build Cancelled", msg)
 
-    def on_error(self, msg: str) -> None:
+    def on_error(self, msg: str, tb: str = "") -> None:
         self._progress.stop()
         pct = int(float(self._progress["value"]))
         self._prog_label.configure(text=f"{pct}%  (Failed)")
         self._append_log(f"\n\u2717 ERROR:\n{msg}\n")
+        if tb:
+            self._append_log(f"\nTraceback:\n{tb}\n")
         self._append_log("Review the log, then use 'Retry Build' or 'Review Plan'.\n")
         self._set_log_actions_enabled(True)
-        messagebox.showerror("Build Failed", msg)
+        themed_showerror(self.app, "Build Failed", msg[:2000])
 
     def _refresh_overall_progress(self) -> None:
         total_steps = len(self.STEPS)
@@ -2212,9 +2814,15 @@ class _BuildPage(ttk.Frame):
         self._log.configure(state="disabled")
         self._log.see("end")
 
+    _LOG_MAX_LINES = 10_000
+
     def _append_log(self, s: str) -> None:
         self._log.configure(state="normal")
         self._log.insert("end", s)
+        total = int(self._log.index("end-1c").split(".")[0])
+        if total > self._LOG_MAX_LINES:
+            trim = total - self._LOG_MAX_LINES
+            self._log.delete("1.0", f"{trim}.0")
         self._log.configure(state="disabled")
         self._log.see("end")
 
@@ -2342,6 +2950,8 @@ class _CompletePage(ttk.Frame):
         src = m.get("source", {})
         source_mode = m.get("project_mode", "create")
         source_detail = src.get("detail") or src.get("path") or src.get("url") or "(none)"
+        tooling_info = artifacts.get("tooling", {})
+        tooling_label = _tooling_summary(tooling_info)
 
         self._lbl_details.configure(text=(
             f"Environment:    {m.get('env_name', '?')}\n"
@@ -2352,6 +2962,7 @@ class _CompletePage(ttk.Frame):
             f"Python version: {m.get('python_version', '?')} ({m.get('arch', '?')})\n"
             f"Launch mode:     {launch_mode_label}\n"
             f"Dependencies:   {dep_mode_label}\n"
+            f"Tooling:            {tooling_label}\n"
             f"Created at:       {m.get('created_at', '?')}\n\n"
             f"Manifest:         {manifest_file}\n"
             f"Agent config:    {config_file}\n\n"
@@ -2380,6 +2991,8 @@ class _CompletePage(ttk.Frame):
         pm_reason = pm.get("reason", "")
         pm_dirs = ", ".join(pm.get("extracted_dirs") or [])
         cache = m.get("cache", {})
+        shortcut_info = artifacts.get("shortcuts", {})
+        tooling_label = _tooling_summary(tooling_info)
 
         # MSI components line
         if pm_status == "ok":
@@ -2398,10 +3011,32 @@ class _CompletePage(ttk.Frame):
         else:
             cache_line = "Cache:                      kept"
 
+        shortcut_labels: list[str] = []
+        if shortcut_info.get("desktop"):
+            shortcut_labels.append("Desktop")
+        if shortcut_info.get("start_menu"):
+            shortcut_labels.append("Start Menu")
+        if shortcut_labels:
+            shortcuts_line = f"Shortcuts:                 ✓ {', '.join(shortcut_labels)}"
+        else:
+            reason = shortcut_info.get("skipped_reason")
+            shortcuts_line = (
+                f"Shortcuts:                 skipped ({reason})"
+                if reason and reason != "not requested"
+                else "Shortcuts:                 skipped"
+            )
+        tooling_line = (
+            f"Tooling:                    \u2713 {tooling_label} (SHA256 verified)"
+            if tooling_label != "None"
+            else "Tooling:                    skipped"
+        )
+
         self._lbl_audit.configure(text=(
             f"Python ZIP source:      {source}\n"
             f"Python ZIP size:         {size_text}\n"
             f"{pm_line}\n"
+            f"{shortcuts_line}\n"
+            f"{tooling_line}\n"
             f"{cache_line}\n"
             f"Download:                   \u2713 HTTPS + trusted-source policy checks\n"
             f"Extraction:                   \u2713 Zip-slip validated\n\n"
@@ -2422,33 +3057,33 @@ class _CompletePage(ttk.Frame):
 #  Version Picker Dialog
 # ══════════════════════════════════════════════════════════════════════════
 
-class _VersionPickerDialog(tk.Toplevel):
+class _VersionPickerDialog(ThemedDialog):
     """Modal dialog to pick an embeddable Python version from python.org."""
 
     def __init__(self, parent: tk.Tk, *, arch: str) -> None:
-        super().__init__(parent)
-        self._app = parent
-        self._theme = getattr(parent, "_theme", None)
-        self.title("Choose Python Version")
-        self.minsize(*VERSION_PICKER_MIN_SIZE)
-        self.transient(parent)
-        self.grab_set()
-
+        super().__init__(
+            parent,
+            title="Choose Python Version",
+            min_width=VERSION_PICKER_MIN_SIZE[0],
+            min_height=VERSION_PICKER_MIN_SIZE[1],
+        )
         self.selected_version: Version | None = None
         self._arch = arch
         self._versions: list[Version] = []
         self._q: queue.Queue[object] = queue.Queue()
 
-        self._build_ui()
+        self._build_picker_ui()
         _disable_button_focus_recursive(self)
-        self._apply_theme_from_parent()
         self._load_async()
 
-    def _build_ui(self) -> None:
+    def _build_picker_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
-        self._lbl_title = ttk.Label(self, text="All stable embeddable Python versions")
+        self._lbl_title = ttk.Label(
+            self, text="All stable embeddable Python versions",
+            style="Heading.TLabel",
+        )
         self._lbl_title.grid(row=0, column=0, sticky="w", padx=16, pady=(16, 8))
 
         frm = ttk.Frame(self)
@@ -2458,6 +3093,7 @@ class _VersionPickerDialog(tk.Toplevel):
 
         self._listbox = tk.Listbox(frm, activestyle="dotbox")
         self._listbox.grid(row=0, column=0, sticky="nsew")
+        self.theme_listbox(self._listbox)
         Tooltip(
             self._listbox,
             "Double-click or select a version, then press Select.",
@@ -2471,7 +3107,7 @@ class _VersionPickerDialog(tk.Toplevel):
         btns.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 16))
         btns.columnconfigure(0, weight=1)
 
-        self._status = ttk.Label(btns, text="Loading\u2026")
+        self._status = ttk.Label(btns, text="Loading\u2026", style="Muted.TLabel")
         self._status.grid(row=0, column=0, sticky="w")
         Tooltip(
             self._status,
@@ -2493,53 +3129,7 @@ class _VersionPickerDialog(tk.Toplevel):
         )
 
         self._listbox.bind("<Double-Button-1>", lambda _: self._select())
-
-    def _apply_theme_from_parent(self) -> None:
-        """Make this dialog match the app theme (incl. tk.Listbox)."""
-        theme = getattr(self._app, "_theme", None)
-        if not isinstance(theme, ThemeManager):
-            return
-        self._theme = theme
-
-        c = theme.colors
-        scale = float(theme.scale)
-
-        # Toplevel bg is important because many ttk widgets are transparent.
-        try:
-            self.configure(bg=c["bg"])
-        except Exception:
-            pass
-
-        # Listbox is a classic tk widget, so it needs explicit theming.
-        if theme.mode == "light":
-            sel_bg = "#cfe5ff"
-            sel_fg = c["fg"]
-        else:
-            sel_bg = c["accent"]
-            sel_fg = c["accent_fg"]
-
-        try:
-            self._listbox.configure(
-                bg=c.get("entry_bg", c["card_bg"]),
-                fg=c["fg"],
-                selectbackground=sel_bg,
-                selectforeground=sel_fg,
-                highlightthickness=1,
-                highlightbackground=c.get("entry_border", c["card_border"]),
-                highlightcolor=c["accent"],
-                relief="flat",
-                borderwidth=1,
-                font=(UI_FONT, max(9, int(round(10 * scale)))),
-            )
-        except Exception:
-            pass
-
-        # Typography tweaks
-        try:
-            self._lbl_title.configure(style="Heading.TLabel")
-            self._status.configure(style="Muted.TLabel")
-        except Exception:
-            pass
+        self.center_over_parent()
 
     def _load_async(self) -> None:
         cached = load_cached_embeddable_versions(self._arch)
@@ -2573,7 +3163,7 @@ class _VersionPickerDialog(tk.Toplevel):
                 self._status.configure(text="Using local versions (refresh failed).")
             else:
                 self._status.configure(text="Failed to load versions.")
-                messagebox.showerror("Load Failed", str(item), parent=self)
+                themed_showerror(self, "Load Failed", str(item))
             return
 
         self._set_versions(list(item), preserve_selection=True)
@@ -2617,4 +3207,3 @@ class _VersionPickerDialog(tk.Toplevel):
         if 0 <= idx < len(self._versions):
             self.selected_version = self._versions[idx]
             self.destroy()
-

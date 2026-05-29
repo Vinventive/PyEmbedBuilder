@@ -18,11 +18,15 @@ from .http import http_get
 _FTP_INDEX_URL = "https://www.python.org/ftp/python/"
 _HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
 _VERSION_CACHE_FILENAME = "embeddable_versions_cache.json"
+_MIN_EMBEDDABLE_VERSION = Version.parse("3.5.0")
 _SEEDED_EMBEDDABLE_VERSION_STRINGS = (
+    "3.14.5",
+    "3.14.4",
     "3.14.3",
     "3.14.2",
     "3.14.1",
     "3.14.0",
+    "3.13.13",
     "3.13.12",
     "3.13.11",
     "3.13.10",
@@ -120,8 +124,10 @@ _SEEDED_EMBEDDABLE_VERSION_STRINGS = (
 )
 
 _versions_cache: list[Version] | None = None
+_versions_cache_ts: float = 0.0
 _release_page_cache: dict[str, str] = {}
 _embed_cache: dict[tuple[str, str], bool] = {}
+_CACHE_TTL_S = 1800.0  # 30 minutes
 
 
 @dataclass(frozen=True)
@@ -146,13 +152,14 @@ def _seeded_embeddable_versions(arch: str) -> list[Version]:
 
 
 def _list_all_stable_versions() -> list[Version]:
-    global _versions_cache
-    if _versions_cache is not None:
+    global _versions_cache, _versions_cache_ts
+    if _versions_cache is not None and (time.monotonic() - _versions_cache_ts) < _CACHE_TTL_S:
         return list(_versions_cache)
 
     html = http_get(
         _FTP_INDEX_URL,
         source_policy="python_ftp_index",
+        audit_level="DEBUG",
     ).decode("utf-8", errors="replace")
     versions: set[Version] = set()
 
@@ -168,6 +175,7 @@ def _list_all_stable_versions() -> list[Version]:
             continue
 
     _versions_cache = sorted(versions)
+    _versions_cache_ts = time.monotonic()
     return list(_versions_cache)
 
 
@@ -181,6 +189,7 @@ def _release_index_html(version: Version) -> str:
     html = http_get(
         url,
         source_policy="python_ftp_release_index",
+        audit_level="DEBUG",
     ).decode("utf-8", errors="replace")
     _release_page_cache[key] = html
     return html
@@ -215,6 +224,10 @@ def list_stable_versions(
     - with *arch*: include versions with an embeddable ZIP for that arch
     - without *arch*: include versions embeddable on at least one Windows arch
     """
+    if embeddable_only and (
+        min_version is None or min_version < _MIN_EMBEDDABLE_VERSION
+    ):
+        min_version = _MIN_EMBEDDABLE_VERSION
     versions = _list_all_stable_versions()
     result: list[Version] = []
 
@@ -237,6 +250,8 @@ def list_stable_versions(
 
 def resolve_embeddable_at_or_above(version: Version, arch: str) -> Version | None:
     """Return the nearest embeddable version >= *version* for the given arch."""
+    if version < _MIN_EMBEDDABLE_VERSION:
+        version = _MIN_EMBEDDABLE_VERSION
     versions = _list_all_stable_versions()
     for candidate in versions:
         if candidate < version:
@@ -265,6 +280,10 @@ def _load_version_cache_payload() -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
         return {"arches": {}}
     if not isinstance(data, dict):
         return {"arches": {}}

@@ -59,9 +59,13 @@ def download_file(
             timeout_s=timeout_s,
             source_policy=source_policy,
         ) as resp:
-            cl = resp.headers.get("Content-Length")
-            if cl and cl.isdigit():
-                bytes_total = int(cl)
+            cl = (resp.headers.get("Content-Length") or "").strip()
+            try:
+                cl_int = int(cl) if cl else 0
+            except (ValueError, OverflowError):
+                cl_int = 0
+            if cl_int > 0:
+                bytes_total = cl_int
                 if bytes_total > max_bytes:
                     raise RuntimeError(
                         f"Declared file size ({bytes_total:,} bytes) exceeds "
@@ -86,6 +90,7 @@ def download_file(
         if bytes_total is not None and bytes_done != bytes_total:
             audit(
                 "download_size_mismatch",
+                level="ERROR",
                 url=url,
                 expected_bytes=str(bytes_total),
                 received_bytes=str(bytes_done),

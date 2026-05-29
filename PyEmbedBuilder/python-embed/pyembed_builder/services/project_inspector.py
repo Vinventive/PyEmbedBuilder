@@ -26,6 +26,7 @@ from .downloader import download_file
 from .extractor import extract_zip
 from .python_catalog import list_stable_versions, resolve_embeddable_at_or_above
 from .subprocess_runner import run_command_stream
+from ._common import cache_key, rmtree_onerror, wipe_dir, reset_cache_dir
 
 
 LogCb = Callable[[str], None]
@@ -91,41 +92,6 @@ class ProjectSourceAnalysis:
             return self.pyproject_file.name
 
 
-def _cache_key(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-
-
-def _rmtree_onerror(func, path: str, _exc_info) -> None:
-    try:
-        os.chmod(path, stat.S_IWRITE)
-    except Exception:
-        pass
-    try:
-        func(path)
-    except Exception:
-        pass
-
-
-def _wipe_dir(path: Path, *, retries: int = 4, delay_s: float = 0.12) -> None:
-    if not path.exists():
-        return
-    last_exc: Exception | None = None
-    for _ in range(retries):
-        try:
-            shutil.rmtree(path, onerror=_rmtree_onerror)
-            return
-        except Exception as exc:
-            last_exc = exc
-            time.sleep(delay_s)
-    if path.exists():
-        raise RuntimeError(f"Failed to remove directory: {path}") from last_exc
-
-
-def _reset_git_analysis_cache_dir(path: Path) -> None:
-    _wipe_dir(path)
-    path.mkdir(parents=True, exist_ok=True)
-
-
 def _prepare_git_snapshot(
     *,
     source_url: str,
@@ -136,10 +102,10 @@ def _prepare_git_snapshot(
     url = normalize_project_git_source(source_url)
     validate_project_source_url(url, "git")
 
-    key = _cache_key(f"{url}|{source_ref}")
+    key = cache_key(f"{url}|{source_ref}")
     root = cache_dir() / "source_analysis" / "git" / key
     log_cb("Resetting cached Git analysis source for this attempt...")
-    _reset_git_analysis_cache_dir(root)
+    reset_cache_dir(root)
     clone_dir = root / "_clone"
 
     source_ref = source_ref.strip()
@@ -153,7 +119,7 @@ def _prepare_git_snapshot(
             )
         except Exception:
             log_cb("Shallow ref clone failed; retrying full clone + checkout for analysis.")
-            _reset_git_analysis_cache_dir(root)
+            reset_cache_dir(root)
             run_command_stream(
                 ["git", "clone", url, str(clone_dir)],
                 log_cb=log_cb,
@@ -181,7 +147,7 @@ def _prepare_git_snapshot(
             )
         except Exception:
             log_cb("Shallow clone failed; retrying full clone for analysis.")
-            _reset_git_analysis_cache_dir(root)
+            reset_cache_dir(root)
             run_command_stream(
                 ["git", "clone", url, str(clone_dir)],
                 log_cb=log_cb,
@@ -191,9 +157,14 @@ def _prepare_git_snapshot(
     return clone_dir
 
 
-def _prepare_zip_snapshot(*, source_url: str, log_cb: LogCb) -> Path:
+def _prepare_zip_snapshot(
+    *,
+    source_url: str,
+    log_cb: LogCb,
+    cancel_event: threading.Event | None = None,
+) -> Path:
     validate_project_source_url(source_url, "zip")
-    key = _cache_key(source_url)
+    key = cache_key(source_url)
     root = cache_dir() / "source_analysis" / "zip" / key
     zip_path = root / "source.zip"
     extract_dir = root / "extract"
@@ -382,7 +353,7 @@ def _compatible_upper(parts: tuple[int, ...]) -> Version:
 def _matches_token(version: Version, token: str) -> bool:
     m = _SPEC_PART_RE.match(token)
     if not m:
-        return True
+        return False
 
     op = m.group("op")
     parts = _parse_version_parts(m.group("ver"))
@@ -413,7 +384,7 @@ def _matches_token(version: Version, token: str) -> bool:
     if op == "~=":
         upper = _compatible_upper(parts)
         return version >= target and version < upper
-    return True
+    return False
 
 
 def _matches_spec(version: Version, spec: str) -> bool:
@@ -594,6 +565,7 @@ def analyze_project_source(
         root = _prepare_zip_snapshot(
             source_url=source_url.strip(),
             log_cb=_log,
+            cancel_event=cancel_event,
         )
         return analyze_project_tree(
             root,

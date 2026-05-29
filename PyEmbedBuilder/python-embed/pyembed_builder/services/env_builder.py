@@ -1,5 +1,5 @@
 """
-Environment builder — orchestrates the full secure build pipeline.
+Environment builder - orchestrates the full secure build pipeline.
 """
 from __future__ import annotations
 
@@ -32,7 +32,9 @@ from .project_inspector import detect_pyproject_dependencies, find_requirements_
 from .project_source import prepare_project_source
 from .pymanager import augment_from_pymanager
 from .python_release_page import get_embeddable_info
+from .shortcuts import create_windows_launch_shortcuts
 from .subprocess_runner import CommandCancelled, run_command_stream
+from .tooling import install_optional_tools
 
 
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
@@ -119,6 +121,14 @@ class EnvBuilder:
             "entry_point_mode": "file",
             "launch_target": plan.entry_point_rel,
             "launch_mode": "window_only" if plan.window_only else "console",
+            "shortcut_options": {
+                "desktop": plan.create_desktop_shortcut,
+                "start_menu": plan.create_start_menu_shortcut,
+            },
+            "tooling_options": {
+                "install_ffmpeg": plan.install_ffmpeg,
+                "ffmpeg_arch": plan.ffmpeg_arch,
+            },
             "dependency_mode": "no_deps" if plan.dependency_no_deps else "resolved",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "python_version": str(plan.version),
@@ -187,6 +197,7 @@ class EnvBuilder:
                     arch=plan.arch,
                     py_root=py_root,
                     log_cb=log_cb,
+                    cancel_event=self._cancel,
                 )
                 pm_detail = (
                     ", ".join(pm.extracted_dirs) if pm.status == "ok" else "Skipped"
@@ -271,7 +282,20 @@ class EnvBuilder:
             self._entrypoint_smoke_test(env_dir, py_root, launch_target, log_cb)
             s("smoke", "Smoke-test launch target", "ok")
 
-            # 11 ─ Create launchers
+            # 11 - Install optional portable tools
+            self._check()
+            s("tooling", "Install optional tools", "running")
+            tooling = install_optional_tools(
+                plan,
+                env_dir,
+                log_cb=log_cb,
+                progress_cb=progress_cb,
+                check_cb=self._check,
+            )
+            self._manifest["artifacts"]["tooling"] = tooling
+            s("tooling", "Install optional tools", "ok", _tooling_step_detail(tooling))
+
+            # 12 - Create launchers
             self._check()
             s("launcher", "Create launcher scripts", "running")
             lr = create_launchers(
@@ -291,7 +315,44 @@ class EnvBuilder:
                 "update_entry_point": lr.update_entry_point_bat.name,
             }
 
-            # 12 ─ Write portable guides
+            self._check()
+            s("shortcuts", "Create Windows launch shortcuts", "running")
+            shortcuts = create_windows_launch_shortcuts(
+                env_name=plan.env_name,
+                env_dir=env_dir,
+                py_root=py_root,
+                entry_point_rel=launch_target.entry_point_rel,
+                window_only=plan.window_only,
+                desktop=plan.create_desktop_shortcut,
+                start_menu=plan.create_start_menu_shortcut,
+                log_cb=log_cb,
+                cancel_event=self._cancel,
+            )
+            self._manifest["artifacts"]["shortcuts"] = {
+                "desktop": (
+                    str(shortcuts.desktop_shortcut)
+                    if shortcuts.desktop_shortcut
+                    else ""
+                ),
+                "start_menu": (
+                    str(shortcuts.start_menu_shortcut)
+                    if shortcuts.start_menu_shortcut
+                    else ""
+                ),
+                "skipped_reason": shortcuts.skipped_reason,
+                "launch_mode": "window_only" if plan.window_only else "console",
+            }
+            if shortcuts.created_count:
+                s(
+                    "shortcuts",
+                    "Create Windows launch shortcuts",
+                    "ok",
+                    f"{shortcuts.created_count} created",
+                )
+            else:
+                s("shortcuts", "Create Windows launch shortcuts", "ok", "Skipped")
+
+            # 13 ─ Write portable guides
             self._check()
             s("guide", "Write portable guides", "running")
             guide_path = self._write_quickstart(env_dir, plan, launch_target, log_cb)
@@ -305,7 +366,7 @@ class EnvBuilder:
             self._manifest["artifacts"]["quickstart"] = guide_path.name
             self._manifest["artifacts"]["configuration_markdown"] = config_path.name
 
-            # 13 ─ Optional: clear cache after build
+            # 14 ─ Optional: clear cache after build
             if plan.clear_cache_on_success:
                 self._check()
                 log_cb("Clearing download cache...")
@@ -323,7 +384,7 @@ class EnvBuilder:
                         "cleared": False,
                         "error": str(exc),
                     }
-                    audit("cache_clear_failed", error=str(exc))
+                    audit("cache_clear_failed", level="WARNING", error=str(exc))
             else:
                 self._manifest["cache"] = {
                     "cleared": False,
@@ -344,12 +405,50 @@ class EnvBuilder:
 
         except CancelledError:
             audit("build_cancelled", env=plan.env_name)
+            self._manifest["status"] = "cancelled"
+            try:
+                marker = env_dir / "BUILD_FAILED.txt"
+                marker.write_text(
+                    "Build was cancelled by user.\n"
+                    "You can delete this folder or retry the build.\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             raise
         except CommandCancelled:
             audit("build_cancelled", env=plan.env_name)
+            self._manifest["status"] = "cancelled"
+            try:
+                marker = env_dir / "BUILD_FAILED.txt"
+                marker.write_text(
+                    "Build was cancelled by user.\n"
+                    "You can delete this folder or retry the build.\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             raise CancelledError("Build cancelled by user.")
         except Exception as exc:
-            audit("build_failed", env=plan.env_name, error=str(exc))
+            audit("build_failed", level="ERROR", env=plan.env_name, error=str(exc))
+            self._manifest["status"] = "failed"
+            self._manifest["error"] = str(exc)
+            try:
+                partial = env_dir / "build_manifest_partial.json"
+                partial.write_text(
+                    json.dumps(self._manifest, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                failed_marker = env_dir / "BUILD_FAILED.txt"
+                failed_marker.write_text(
+                    f"This environment failed to build completely.\n"
+                    f"Error: {exc}\n\n"
+                    f"You can delete this folder or retry the build.\n"
+                    f"See build_manifest_partial.json for diagnostic details.\n",
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
             raise
         finally:
             set_audit_env_root(None)
@@ -369,9 +468,23 @@ class EnvBuilder:
                 cache_path.unlink(missing_ok=True)
                 cached_size = 0
             else:
-                log_cb(
-                    f"Cached ZIP found ({cached_size:,} bytes) — refreshing from source."
-                )
+                log_cb(f"Cached ZIP found ({cached_size:,} bytes).")
+                try:
+                    from .http import _build_request, _open_url
+                    head_req = _build_request(info.url, method="HEAD", source_policy="python_embed_zip")
+                    with _open_url(head_req, timeout_s=15.0, source_policy="python_embed_zip") as resp:
+                        remote_cl = (resp.headers.get("Content-Length") or "").strip()
+                        remote_size = int(remote_cl) if remote_cl.isdigit() else 0
+                    if remote_size > 0 and remote_size == cached_size:
+                        log_cb(f"Cache is up-to-date (size match: {cached_size:,} bytes). Skipping download.")
+                        self._manifest["artifacts"]["python_zip"].update({
+                            "source": "cache_verified",
+                            "size_bytes": cached_size,
+                        })
+                        return cache_path
+                    log_cb(f"Cache size mismatch (local: {cached_size:,}, remote: {remote_size:,}). Re-downloading.")
+                except Exception as exc:
+                    log_cb(f"Cache validation check failed ({exc}). Re-downloading.")
 
         # Download
         self._check()
@@ -429,7 +542,7 @@ class EnvBuilder:
         except Exception as exc:
             if cached_get_pip.exists() and cached_get_pip.stat().st_size > 0:
                 log_cb(f"get-pip.py download failed ({exc}); using cached copy.")
-                audit("get_pip_cache_fallback", error=str(exc))
+                audit("get_pip_cache_fallback", level="WARNING", error=str(exc))
             else:
                 raise
 
@@ -493,63 +606,16 @@ class EnvBuilder:
             log_cb("Using main.py as launch entry point.")
             return LaunchTarget(entry_point_rel="main.py")
 
-        if plan.use_pymanager_components:
+        template_name = "main_tk.py" if plan.use_pymanager_components else "main_console.py"
+        try:
+            template_dir = Path(__file__).resolve().parents[1] / "templates"
+            template_path = template_dir / template_name
+            starter_main = template_path.read_text(encoding="utf-8")
+        except Exception:
             starter_main = (
-                "\"\"\"PyEmbedBuilder starter entry point.\"\"\"\n\n"
-                "def main() -> int:\n"
-                "    try:\n"
-                "        import tkinter as tk\n"
-                "        from tkinter import ttk\n"
-                "    except Exception:\n"
-                "        print(\"This is the default entry point.\")\n"
-                "        print(\"Replace main.py or set a custom entry point for your app.\")\n"
-                "        try:\n"
-                "            input(\"Press Enter to close...\")\n"
-                "        except EOFError:\n"
-                "            pass\n"
-                "        return 0\n\n"
-                "    root = tk.Tk()\n"
-                "    root.title(\"PyEmbedBuilder Starter\")\n"
-                "    root.resizable(False, False)\n\n"
-                "    frame = ttk.Frame(root, padding=16)\n"
-                "    frame.grid(row=0, column=0, sticky=\"nsew\")\n\n"
-                "    text = (\n"
-                "        \"This is the default entry point.\\n\"\n"
-                "        \"Replace main.py or set a custom entry point for your app.\"\n"
-                "    )\n"
-                "    lbl = ttk.Label(frame, text=text, justify=\"center\", anchor=\"center\")\n"
-                "    lbl.grid(row=0, column=0, pady=(0, 12))\n\n"
-                "    btn = ttk.Button(frame, text=\"Close\", command=root.destroy)\n"
-                "    btn.grid(row=1, column=0)\n"
-                "    btn.focus_set()\n\n"
-                "    root.update_idletasks()\n"
-                "    w = root.winfo_reqwidth()\n"
-                "    h = root.winfo_reqheight()\n"
-                "    sw = root.winfo_screenwidth()\n"
-                "    sh = root.winfo_screenheight()\n"
-                "    x = max(0, (sw - w) // 2)\n"
-                "    y = max(0, (sh - h) // 2)\n"
-                "    root.geometry(f\"{w}x{h}+{x}+{y}\")\n\n"
-                "    root.mainloop()\n"
-                "    return 0\n\n\n"
-                "if __name__ == \"__main__\":\n"
-                "    raise SystemExit(main())\n"
-            )
-        else:
-            starter_main = (
-                "\"\"\"PyEmbedBuilder starter entry point.\"\"\"\n\n"
-                "import sys\n\n"
-                "def main() -> int:\n"
-                "    print(\"This is the default entry point.\")\n"
-                "    print(\"Replace main.py or set a custom entry point for your app.\")\n"
-                "    if sys.stdin is not None and sys.stdin.isatty():\n"
-                "        try:\n"
-                "            input(\"Press Enter to close...\")\n"
-                "        except EOFError:\n"
-                "            pass\n"
-                "    return 0\n\n\n"
-                "if __name__ == \"__main__\":\n"
-                "    raise SystemExit(main())\n"
+                '"""PyEmbedBuilder starter entry point."""\n\n'
+                'print("This is the default entry point.")\n'
+                'print("Replace main.py or set a custom entry point for your app.")\n'
             )
 
         main_abs.parent.mkdir(parents=True, exist_ok=True)
@@ -860,6 +926,23 @@ class EnvBuilder:
     ) -> Path:
         guide = env_dir / "README_portable.txt"
         launch_target_label = launch_target.display or "(auto)"
+        shortcut_info = self._manifest.get("artifacts", {}).get("shortcuts", {})
+        shortcut_lines: list[str] = []
+        if shortcut_info.get("desktop"):
+            shortcut_lines.append(f"- Desktop shortcut: {shortcut_info.get('desktop')}")
+        if shortcut_info.get("start_menu"):
+            shortcut_lines.append(f"- Start Menu shortcut: {shortcut_info.get('start_menu')}")
+        if shortcut_lines:
+            shortcut_text = (
+                "\nInstalled shortcuts\n-------------------\n"
+                + "\n".join(shortcut_lines)
+                + "\n\n"
+            )
+        else:
+            shortcut_text = ""
+        tooling_text = _quickstart_tooling_text(
+            self._manifest.get("artifacts", {}).get("tooling", {})
+        )
         launch_hint = (
             "- If launch.bat reports missing entry point, run update_entry_point.bat\n"
             "  to select a valid .py file (or rebuild with a different source).\n"
@@ -877,6 +960,8 @@ class EnvBuilder:
                 f"Launch target: {launch_target_label}\n"
                 f"Python mode: {'pythonw.exe (window only)' if plan.window_only else 'python.exe (console)'}\n"
                 f"Dependency mode: {'--no-deps' if plan.dependency_no_deps else 'resolved'}\n\n"
+                f"{shortcut_text}"
+                f"{tooling_text}"
                 "Troubleshooting\n"
                 "---------------\n"
                 f"{launch_hint}"
@@ -902,6 +987,8 @@ class EnvBuilder:
         py_zip = artifacts.get("python_zip", {})
         pth_info = artifacts.get("pth", {})
         pm_info = artifacts.get("pymanager", {})
+        shortcut_info = artifacts.get("shortcuts", {})
+        tooling_info = artifacts.get("tooling", {})
 
         try:
             py_root_rel = py_root.relative_to(env_dir).as_posix()
@@ -936,6 +1023,9 @@ class EnvBuilder:
             f"- Architecture: `{self._manifest.get('arch', plan.arch)}`",
             f"- Python runtime root: `{py_root_rel}`",
             f"- Launch mode: `{launch_mode}`",
+            f"- Desktop shortcut requested: `{_yes_no(plan.create_desktop_shortcut)}`",
+            f"- Start Menu shortcut requested: `{_yes_no(plan.create_start_menu_shortcut)}`",
+            f"- FFmpeg requested: `{_yes_no(plan.install_ffmpeg)}`",
             f"- Dependency mode: `{dep_mode}`",
             f"- Builder version: `{self._manifest.get('builder_version', __version__)}`",
             f"- Created at: `{self._manifest.get('created_at', '')}`",
@@ -962,6 +1052,29 @@ class EnvBuilder:
             lines.append(f"- MSI packages used: `{pm_info.get('pythoncore_zip')}`")
         if pm_reason:
             lines.append(f"- Notes: `{pm_reason}`")
+
+        ffmpeg_info = tooling_info.get("ffmpeg", {})
+        lines.extend([
+            "",
+            "## Optional Tooling",
+            f"- FFmpeg requested: `{_yes_no(plan.install_ffmpeg)}`",
+            f"- FFmpeg status: `{ffmpeg_info.get('status', 'skipped')}`",
+            f"- FFmpeg arch: `{ffmpeg_info.get('arch') or plan.ffmpeg_arch}`",
+            f"- FFmpeg path: `{ffmpeg_info.get('path') or '(none)'}`",
+            f"- FFmpeg SHA256: `{ffmpeg_info.get('sha256') or '(none)'}`",
+        ])
+        if tooling_info.get("env_bat"):
+            lines.append(f"- Tool environment hook: `{tooling_info.get('env_bat')}`")
+
+        lines.extend([
+            "",
+            "## Windows Shortcuts",
+            f"- Shortcut launch mode: `{shortcut_info.get('launch_mode') or '(none)'}`",
+            f"- Desktop shortcut: `{shortcut_info.get('desktop') or '(none)'}`",
+            f"- Start Menu shortcut: `{shortcut_info.get('start_menu') or '(none)'}`",
+        ])
+        if shortcut_info.get("skipped_reason"):
+            lines.append(f"- Shortcut notes: `{shortcut_info.get('skipped_reason')}`")
 
         lines.extend([
             "",
@@ -1094,6 +1207,29 @@ def _format_size_bytes(value: object) -> str:
     if isinstance(value, int) and value >= 0:
         return f"{value:,} bytes"
     return "(unknown)"
+
+
+def _tooling_step_detail(tooling: dict) -> str:
+    installed: list[str] = []
+    ffmpeg = tooling.get("ffmpeg", {})
+    if isinstance(ffmpeg, dict) and ffmpeg.get("status") == "ok":
+        installed.append("FFmpeg")
+    return ", ".join(installed) if installed else "Skipped"
+
+
+def _quickstart_tooling_text(tooling: dict) -> str:
+    lines: list[str] = []
+    ffmpeg = tooling.get("ffmpeg", {})
+    if isinstance(ffmpeg, dict) and ffmpeg.get("status") == "ok":
+        lines.append(f"- FFmpeg: {ffmpeg.get('path')}")
+    if not lines:
+        return ""
+    return (
+        "\nInstalled optional tools\n"
+        "------------------------\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
 
 
 def _append_markdown_section(lines: list[str], heading: str, items: list[object]) -> None:

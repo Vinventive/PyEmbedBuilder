@@ -375,6 +375,7 @@ class ThemeManager:
 
         # -- Update all existing Entry/Combobox widget fonts ---------
         self._refresh_entry_fonts(entry_font)
+        self.refresh_combobox_popdowns(entry_font=entry_font)
 
         # -- Selection colors (Entry/Combobox) -----------------------
         sel_bg = c["accent"]
@@ -499,6 +500,73 @@ class ThemeManager:
     def _refresh_entry_fonts(self, font_spec: tuple) -> None:
         """Walk all widgets and update font on Entry/Combobox/Listbox."""
         self._walk_and_set_font(self.root, font_spec)
+
+    def refresh_combobox_popdowns(
+        self,
+        widget: tk.Widget | None = None,
+        *,
+        entry_font: tuple | None = None,
+    ) -> None:
+        """Refresh ttk combobox popup listboxes after theme or font changes."""
+        root = widget or self.root
+        font_spec = entry_font or (UI_FONT, max(9, int(round(10 * self._scale))))
+        self._walk_and_theme_combobox_popdowns(root, font_spec)
+
+    def theme_combobox_popdown(
+        self,
+        combobox: ttk.Combobox,
+        *,
+        entry_font: tuple | None = None,
+        install_postcommand: bool = True,
+    ) -> None:
+        """Apply current theme colors to a ttk combobox and its popup listbox."""
+        font_spec = entry_font or (UI_FONT, max(9, int(round(10 * self._scale))))
+        c = self.colors
+        try:
+            combobox.configure(font=font_spec)
+        except tk.TclError:
+            pass
+
+        if install_postcommand:
+            try:
+                if not str(combobox.cget("postcommand")):
+                    combobox.configure(
+                        postcommand=lambda cb=combobox: self.theme_combobox_popdown(
+                            cb,
+                            install_postcommand=False,
+                        )
+                    )
+            except tk.TclError:
+                pass
+
+        try:
+            popdown = combobox.tk.call("ttk::combobox::PopdownWindow", str(combobox))
+            listbox = f"{popdown}.f.l"
+            combobox.tk.call(
+                listbox,
+                "configure",
+                "-background", c["entry_bg"],
+                "-foreground", c["fg"],
+                "-selectbackground", c["accent"],
+                "-selectforeground", c["accent_fg"],
+                "-highlightbackground", c["entry_border"],
+                "-highlightcolor", c["accent"],
+                "-borderwidth", "0",
+                "-relief", "flat",
+                "-font", font_spec,
+            )
+        except tk.TclError:
+            pass
+
+    def _walk_and_theme_combobox_popdowns(
+        self,
+        widget: tk.Widget,
+        font_spec: tuple,
+    ) -> None:
+        for child in widget.winfo_children():
+            if isinstance(child, ttk.Combobox):
+                self.theme_combobox_popdown(child, entry_font=font_spec)
+            self._walk_and_theme_combobox_popdowns(child, font_spec)
 
     def _walk_and_set_font(self, widget: tk.Widget, font_spec: tuple) -> None:
         for child in widget.winfo_children():
@@ -819,3 +887,188 @@ class Tooltip:
         if self._tip:
             self._tip.destroy()
             self._tip = None
+
+
+# -- Themed Dialog Base -----------------------------------------------------
+
+def _resolve_theme(widget: tk.Widget) -> ThemeManager | None:
+    """Walk up the widget tree to find the ThemeManager instance."""
+    top = widget.winfo_toplevel()
+    theme = getattr(top, "_theme", None)
+    if isinstance(theme, ThemeManager):
+        return theme
+    app = getattr(top, "_app", None)
+    if app is not None:
+        theme = getattr(app, "_theme", None)
+        if isinstance(theme, ThemeManager):
+            return theme
+    return None
+
+
+class ThemedDialog(tk.Toplevel):
+    """Base class for popup dialogs that inherit the app theme.
+
+    Subclass or use directly. Provides:
+    - Themed background, font scaling, and Listbox/Entry colors
+    - transient + grab_set for modal behavior
+    - Center-over-parent positioning
+    - Escape key closes the dialog
+    """
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        title: str = "",
+        min_width: int = 400,
+        min_height: int = 200,
+        resizable: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self._app = parent if isinstance(parent, tk.Tk) else parent.winfo_toplevel()
+        self._theme: ThemeManager | None = _resolve_theme(parent)
+
+        if title:
+            self.title(title)
+        self.minsize(min_width, min_height)
+        self.transient(parent)
+        self.grab_set()
+        if not resizable:
+            self.resizable(False, False)
+
+        self.bind("<Escape>", lambda _: self.destroy())
+        self.apply_theme()
+
+    @property
+    def theme(self) -> ThemeManager | None:
+        return self._theme
+
+    @property
+    def colors(self) -> dict[str, str]:
+        if self._theme:
+            return self._theme.colors
+        return COLORS["dark"]
+
+    @property
+    def scale(self) -> float:
+        return self._theme.scale if self._theme else 1.0
+
+    def apply_theme(self) -> None:
+        """Apply current theme colors to this Toplevel."""
+        c = self.colors
+        try:
+            self.configure(bg=c["bg"])
+        except Exception:
+            pass
+
+    def theme_listbox(self, lb: tk.Listbox) -> None:
+        """Apply full theme to a classic tk.Listbox."""
+        c = self.colors
+        mode = self._theme.mode if self._theme else "dark"
+        if mode == "light":
+            sel_bg = "#cfe5ff"
+            sel_fg = c["fg"]
+        else:
+            sel_bg = c["accent"]
+            sel_fg = c["accent_fg"]
+        try:
+            lb.configure(
+                bg=c.get("entry_bg", c["card_bg"]),
+                fg=c["fg"],
+                selectbackground=sel_bg,
+                selectforeground=sel_fg,
+                highlightthickness=1,
+                highlightbackground=c.get("entry_border", c["card_border"]),
+                highlightcolor=c["accent"],
+                relief="flat",
+                borderwidth=1,
+                font=(UI_FONT, max(9, int(round(10 * self.scale)))),
+            )
+        except Exception:
+            pass
+
+    def center_over_parent(self) -> None:
+        """Position this dialog centered over the parent window."""
+        self.update_idletasks()
+        pw, ph = self.winfo_reqwidth(), self.winfo_reqheight()
+        parent = self._app
+        px = parent.winfo_rootx() + (parent.winfo_width() - pw) // 2
+        py = parent.winfo_rooty() + (parent.winfo_height() - ph) // 2
+        self.geometry(f"+{max(0, px)}+{max(0, py)}")
+
+
+# -- Themed Message Boxes --------------------------------------------------
+
+def themed_message(
+    parent: tk.Widget,
+    *,
+    title: str,
+    message: str,
+    icon: str = "info",
+    buttons: tuple[str, ...] = ("OK",),
+    accent_button: str = "OK",
+) -> str:
+    """Show a themed modal message box, returns the label of the clicked button."""
+    dlg = ThemedDialog(
+        parent,
+        title=title,
+        min_width=360,
+        min_height=120,
+        resizable=False,
+    )
+    result: list[str] = [buttons[0] if buttons else ""]
+
+    body = ttk.Frame(dlg)
+    body.pack(fill="both", expand=True, padx=20, pady=(16, 8))
+    body.columnconfigure(0, weight=1)
+
+    ttk.Label(
+        body,
+        text=message,
+        wraplength=420,
+        justify="left",
+        style="TLabel",
+    ).grid(row=0, column=0, sticky="nw")
+
+    btn_frame = ttk.Frame(dlg)
+    btn_frame.pack(fill="x", padx=20, pady=(4, 16))
+    btn_frame.columnconfigure(0, weight=1)
+
+    for i, label in enumerate(reversed(buttons)):
+        def _click(lbl=label):
+            result[0] = lbl
+            dlg.destroy()
+
+        style = "Accent.TButton" if label == accent_button else "TButton"
+        b = ttk.Button(btn_frame, text=label, style=style, command=_click)
+        b.pack(side="right", padx=(6, 0) if i > 0 else (0, 0))
+        if label == accent_button:
+            b.focus_set()
+
+    dlg.center_over_parent()
+    dlg.wait_window(dlg)
+    return result[0]
+
+
+def themed_showinfo(parent: tk.Widget, title: str, message: str) -> None:
+    themed_message(parent, title=title, message=message, icon="info")
+
+
+def themed_showerror(parent: tk.Widget, title: str, message: str) -> None:
+    themed_message(parent, title=title, message=message, icon="error")
+
+
+def themed_showwarning(parent: tk.Widget, title: str, message: str) -> None:
+    themed_message(parent, title=title, message=message, icon="warning")
+
+
+def themed_askyesno(parent: tk.Widget, title: str, message: str) -> bool:
+    result = themed_message(
+        parent,
+        title=title,
+        message=message,
+        icon="question",
+        buttons=("No", "Yes"),
+        accent_button="Yes",
+    )
+    return result == "Yes"

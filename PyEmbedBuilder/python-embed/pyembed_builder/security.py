@@ -7,10 +7,13 @@ secure zip extraction validation, and audit logging.
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import shlex
 import ssl
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -24,6 +27,8 @@ ALLOWED_DOWNLOAD_DOMAINS: frozenset[str] = frozenset({
     "www.python.org",
     "python.org",
     "bootstrap.pypa.io",
+    "www.gyan.dev",
+    "gyan.dev",
 })
 
 ALLOWED_PROJECT_SOURCE_DOMAINS: frozenset[str] = frozenset({
@@ -157,6 +162,20 @@ _SOURCE_POLICIES: dict[str, SourcePolicy] = {
     "get_pip_script": SourcePolicy(
         hosts=frozenset({"bootstrap.pypa.io"}),
         path_re=re.compile(r"^/(?:pip/)?get-pip\.py$", re.IGNORECASE),
+    ),
+    "ffmpeg_build_zip": SourcePolicy(
+        hosts=frozenset({"gyan.dev", "www.gyan.dev"}),
+        path_re=re.compile(
+            r"^/ffmpeg/builds/(?:ffmpeg-release-essentials|packages/ffmpeg-[A-Za-z0-9._-]+-essentials_build)\.zip$",
+            re.IGNORECASE,
+        ),
+    ),
+    "ffmpeg_build_hash": SourcePolicy(
+        hosts=frozenset({"gyan.dev", "www.gyan.dev"}),
+        path_re=re.compile(
+            r"^/ffmpeg/builds/(?:ffmpeg-release-essentials|packages/ffmpeg-[A-Za-z0-9._-]+-essentials_build)\.zip\.sha256$",
+            re.IGNORECASE,
+        ),
     ),
     "project_zip": SourcePolicy(
         hosts=ALLOWED_PROJECT_SOURCE_DOMAINS,
@@ -342,6 +361,26 @@ def validate_target_path(target: Path) -> Path:
             f"Cannot create environments inside system directory: {critical}"
         )
 
+    # Reject temp and recycler directories
+    for env_key in ("TEMP", "TMP"):
+        val = os.environ.get(env_key)
+        if not val:
+            continue
+        try:
+            temp_dir = Path(val).resolve()
+            if resolved == temp_dir:
+                raise ValueError(
+                    f"Cannot create environments directly in temp directory: {temp_dir}"
+                )
+        except ValueError:
+            raise
+        except Exception:
+            continue
+
+    # Reject root of system drive
+    if resolved.parent == resolved:
+        raise ValueError("Cannot create environments at a drive root.")
+
     return resolved
 
 
@@ -414,13 +453,13 @@ def _relativize_path(value: str) -> str:
     if _audit_env_root:
         try:
             rel = p.relative_to(_audit_env_root.resolve())
-            return f".\\{rel}" if str(rel) else "."
+            return f"./{rel}" if str(rel) else "."
         except Exception:
             pass
 
     try:
         rel = p.relative_to(project_root().resolve())
-        return f".\\{rel}" if str(rel) else "."
+        return f"./{rel}" if str(rel) else "."
     except Exception:
         return value
 
@@ -450,32 +489,83 @@ def set_audit_env_root(path: Path | None) -> None:
     _audit_env_root = path.resolve() if path else None
 
 
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+}
+
+_SESSION_LOGGED = False
+
+
 def get_audit_logger() -> logging.Logger:
     """Get or create the security audit file logger."""
-    global _audit_logger
+    global _audit_logger, _SESSION_LOGGED
     if _audit_logger is not None:
         return _audit_logger
 
     logger = logging.getLogger("pyembed_builder.security")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
     log_path = logs_dir() / "security_audit.log"
-    handler = logging.FileHandler(str(log_path), encoding="utf-8")
+    handler = RotatingFileHandler(
+        str(log_path), encoding="utf-8",
+        maxBytes=5 * 1024 * 1024, backupCount=3,
+    )
     handler.setFormatter(
         logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S",
+            "%(asctime)s%(msecs)03dZ | %(levelname)-7s | %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S.",
         )
     )
+    handler.formatter.converter = time.gmtime
     logger.addHandler(handler)
     _audit_logger = logger
+
+    if not _SESSION_LOGGED:
+        _SESSION_LOGGED = True
+        from . import __version__
+        logger.info(
+            "session_start | builder_version=%s | python=%s | platform=%s",
+            __version__,
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            sys.platform,
+        )
+
     return logger
 
 
-def audit(event: str, **kw: str) -> None:
-    """Write a security audit log entry."""
-    safe_kw = {k: _relativize_path(str(v)) for k, v in kw.items()}
+def _sanitize_value_for_log(value: str) -> str:
+    """Collapse multi-line values into a single safe log token."""
+    sanitized = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    if len(sanitized) > 512:
+        sanitized = sanitized[:509] + "..."
+    return sanitized
+
+
+def audit(
+    event: str,
+    *,
+    level: str = "INFO",
+    **kw: str,
+) -> None:
+    """Write a security audit log entry.
+
+    Args:
+        event: Machine-readable event identifier (e.g. 'download_start').
+        level: One of 'DEBUG', 'INFO', 'WARNING', 'ERROR'. Use DEBUG for
+               routine/noisy events like version probing. Use WARNING for
+               fallback actions. Use ERROR for failures.
+        **kw: Key-value context. Values are redacted, relativized, and
+              sanitized (multi-line collapsed, length-capped).
+    """
+    safe_kw = {
+        k: _sanitize_value_for_log(_relativize_path(str(v)))
+        for k, v in kw.items()
+    }
     detail = " | ".join(f"{k}={v}" for k, v in safe_kw.items())
     msg = f"{event} | {detail}" if detail else event
-    get_audit_logger().info(msg)
+    log_level = _LOG_LEVELS.get(level.upper(), logging.INFO)
+    get_audit_logger().log(log_level, msg)

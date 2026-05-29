@@ -9,6 +9,23 @@ from pathlib import Path
 from ..security import audit
 
 
+def _validate_bat_safe(value: str, label: str) -> None:
+    """Ensure a value is safe to embed in a Windows batch file."""
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError(
+            f"{label} contains non-ASCII characters which are unsafe in "
+            f"batch files: {value!r}"
+        )
+    for ch in ("%", "!", "^"):
+        if ch in value:
+            raise ValueError(
+                f"{label} contains special character {ch!r} which is unsafe "
+                f"in batch files: {value!r}"
+            )
+
+
 @dataclass(frozen=True)
 class LauncherResult:
     deps_bat: Path
@@ -16,6 +33,10 @@ class LauncherResult:
     uninstall_bat: Path
     launch_bat: Path
     update_entry_point_bat: Path
+
+
+_TOOL_ENV_CALL = 'if exist ".\\_pyembed_env.bat" call ".\\_pyembed_env.bat"\r\n'
+
 
 def _build_file_launch_bat(*, py_rel_win: str, entry_rel: str, window_only: bool) -> str:
     """Return launch.bat body for direct .py entry-point launches."""
@@ -25,7 +46,8 @@ def _build_file_launch_bat(*, py_rel_win: str, entry_rel: str, window_only: bool
             "setlocal EnableExtensions\r\n"
             'set "ROOT=%~dp0"\r\n'
             'pushd "%ROOT%"\r\n'
-            f'if not exist ".\\{entry_rel}" (\r\n'
+            + _TOOL_ENV_CALL
+            + f'if not exist ".\\{entry_rel}" (\r\n'
             f'    echo Entry point not found: {entry_rel}\r\n'
             '    echo Run update_entry_point.bat to select a valid .py file.\r\n'
             "    popd\r\n"
@@ -42,7 +64,8 @@ def _build_file_launch_bat(*, py_rel_win: str, entry_rel: str, window_only: bool
         "setlocal EnableExtensions\r\n"
         'set "ROOT=%~dp0"\r\n'
         'pushd "%ROOT%"\r\n'
-        f'if not exist ".\\{entry_rel}" (\r\n'
+        + _TOOL_ENV_CALL
+        + f'if not exist ".\\{entry_rel}" (\r\n'
         f'    echo Entry point not found: {entry_rel}\r\n'
         '    echo Run update_entry_point.bat to select a valid .py file.\r\n'
         "    popd\r\n"
@@ -180,6 +203,7 @@ def _build_update_helper_script(*, py_rel_win: str, window_only: bool) -> str:
         "            'setlocal EnableExtensions\\r\\n'\n"
         "            'set \"ROOT=%~dp0\"\\r\\n'\n"
         "            'pushd \"%ROOT%\"\\r\\n'\n"
+        "            'if exist \".\\\\_pyembed_env.bat\" call \".\\\\_pyembed_env.bat\"\\r\\n'\n"
         "            f'if not exist \".\\\\{entry_rel}\" (\\r\\n'\n"
         "            f'    echo Entry point not found: {entry_rel}\\r\\n'\n"
         "            '    echo Run update_entry_point.bat to select a valid .py file.\\r\\n'\n"
@@ -197,6 +221,7 @@ def _build_update_helper_script(*, py_rel_win: str, window_only: bool) -> str:
         "        'setlocal EnableExtensions\\r\\n'\n"
         "        'set \"ROOT=%~dp0\"\\r\\n'\n"
         "        'pushd \"%ROOT%\"\\r\\n'\n"
+        "        'if exist \".\\\\_pyembed_env.bat\" call \".\\\\_pyembed_env.bat\"\\r\\n'\n"
         "        f'if not exist \".\\\\{entry_rel}\" (\\r\\n'\n"
         "        f'    echo Entry point not found: {entry_rel}\\r\\n'\n"
         "        '    echo Run update_entry_point.bat to select a valid .py file.\\r\\n'\n"
@@ -302,6 +327,8 @@ def create_launchers(
     entry_rel = entry_point_rel.replace("/", "\\").lstrip("\\/")
     if not entry_rel:
         raise ValueError("create_launchers requires entry_point_rel.")
+    _validate_bat_safe(py_rel_win, "Python runtime path")
+    _validate_bat_safe(entry_rel, "Entry point path")
     (env_dir / "_pyembed_launch.py").unlink(missing_ok=True)
 
     # Dependency install helper (interactive by default)
@@ -310,6 +337,7 @@ def create_launchers(
         "@echo off\r\n"
         "setlocal EnableExtensions\r\n"
         'cd /d "%~dp0"\r\n'
+        'if exist ".\\_pyembed_env.bat" call ".\\_pyembed_env.bat"\r\n'
         'if not "%~1"=="" (\r\n'
         f'    ".\\{py_rel_win}\\python.exe" -m pip install %*\r\n'
         "    exit /b %errorlevel%\r\n"
@@ -317,7 +345,10 @@ def create_launchers(
         "echo ==========================================\r\n"
         "echo   Dependency Installer (embedded Python)\r\n"
         "echo ==========================================\r\n"
-        "echo.\r\n"
+        + ("echo NOTE: This environment was built with --no-deps mode.\r\n"
+           "echo       Consider using --no-deps for consistency.\r\n"
+           if dependency_no_deps else "")
+        + "echo.\r\n"
         ":prompt\r\n"
         'set "PKG="\r\n'
         'set /p PKG=Enter package(s) to install (blank to exit): \r\n'
@@ -343,6 +374,7 @@ def create_launchers(
         "@echo off\r\n"
         "setlocal EnableExtensions\r\n"
         'cd /d "%~dp0"\r\n'
+        'if exist ".\\_pyembed_env.bat" call ".\\_pyembed_env.bat"\r\n'
         'if not "%~1"=="" (\r\n'
         f'    ".\\{py_rel_win}\\python.exe" -m pip list %*\r\n'
         "    exit /b %errorlevel%\r\n"
@@ -362,6 +394,7 @@ def create_launchers(
         "@echo off\r\n"
         "setlocal EnableExtensions\r\n"
         'cd /d "%~dp0"\r\n'
+        'if exist ".\\_pyembed_env.bat" call ".\\_pyembed_env.bat"\r\n'
         'if not "%~1"=="" (\r\n'
         f'    ".\\{py_rel_win}\\python.exe" -m pip uninstall -y %*\r\n'
         "    exit /b %errorlevel%\r\n"
@@ -414,6 +447,7 @@ def create_launchers(
         "@echo off\r\n"
         "setlocal EnableExtensions\r\n"
         'cd /d "%~dp0"\r\n'
+        'if exist ".\\_pyembed_env.bat" call ".\\_pyembed_env.bat"\r\n'
         f'set "PYROOT=%CD%\\{py_rel_win}"\r\n'
         'set "PATH=%PYROOT%;%PYROOT%\\DLLs;%PATH%"\r\n'
         'if not defined TCL_LIBRARY if exist "%PYROOT%\\tcl\\tcl8.7\\init.tcl" set "TCL_LIBRARY=%PYROOT%\\tcl\\tcl8.7"\r\n'

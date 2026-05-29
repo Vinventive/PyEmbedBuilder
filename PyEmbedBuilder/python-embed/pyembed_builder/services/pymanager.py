@@ -7,18 +7,18 @@ python.org publishes individual MSI packages for every Windows release at::
 
 Each architecture subdirectory contains MSI files such as:
 
-    core.msi   — Core runtime (python.exe, DLLs, .pyd modules)
-    lib.msi    — Standard library (Lib/)
-    tcltk.msi  — Tcl/Tk runtime (tcl/, _tkinter.pyd)
-    dev.msi    — Development headers & import libraries (include/, libs/)
-    tools.msi  — Scripts and tools (Scripts/)
+    core.msi   - Core runtime (python.exe, DLLs, .pyd modules)
+    lib.msi    - Standard library (Lib/)
+    tcltk.msi  - Tcl/Tk runtime (tcl/, _tkinter.pyd)
+    dev.msi    - Development headers & import libraries (include/, libs/)
+    tools.msi  - Scripts and tools (Scripts/)
 
 We download only the MSIs we need for the exact version the user picked,
 extract them with the Windows built-in ``msiexec /a`` (admin install, no
 elevation required), and copy the desired directories into the embedded
 environment's ``python-embed/`` root.
 
-This is entirely optional and best-effort — if the MSI files aren't
+This is entirely optional and best-effort - if the MSI files aren't
 available or extraction fails, the build continues without them.
 """
 from __future__ import annotations
@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import ctypes
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -105,7 +106,7 @@ def _extract_msi(msi_path: Path, target_dir: Path, log_cb) -> bool:
     # Primary: administrative install (extract without system install).
     msiexec_exe = _resolve_msiexec()
     if not msiexec_exe:
-        log_cb("    msiexec not found — is this a Windows system?")
+        log_cb("    msiexec not found - is this a Windows system?")
         return False
 
     cmd = [
@@ -130,6 +131,7 @@ def _extract_msi(msi_path: Path, target_dir: Path, log_cb) -> bool:
             log_cb(f"    msiexec exit {result.returncode}: {detail}")
             audit(
                 "pymanager_msiexec_fail",
+                level="WARNING",
                 msi=msi_path.name,
                 exit_code=str(result.returncode),
             )
@@ -152,9 +154,9 @@ def _flatten_platform_dirs(root: Path, log_cb) -> None:
 
     MSI packages (especially tools.msi) organise scripts into::
 
-        Scripts/common/   — cross-platform scripts
-        Scripts/nt/       — Windows-specific scripts
-        Scripts/posix/    — Unix-specific scripts (not needed)
+        Scripts/common/   - cross-platform scripts
+        Scripts/nt/       - Windows-specific scripts
+        Scripts/posix/    - Unix-specific scripts (not needed)
 
     We merge ``common/`` and ``nt/`` contents up into the parent and
     remove all three subdirectories.  This mirrors what the real
@@ -197,7 +199,7 @@ def _flatten_platform_dirs(root: Path, log_cb) -> None:
 # Files and directories from the MSI that serve no purpose in an embedded
 # Python environment (venv scaffolding, idle shell, etc.).
 _JUNK_FILES: set[str] = {
-    # venv activation / launcher — embedded Python IS the environment
+    # venv activation / launcher - embedded Python IS the environment
     "activate",
     "activate.bat",
     "activate.fish",
@@ -273,7 +275,7 @@ def augment_from_pymanager(
     arch: str,
     py_root: Path,
     log_cb,
-    max_candidates: int = 3,
+    cancel_event: threading.Event | None = None,
 ) -> PyManagerResult:
     """Download per-version MSI packages from python.org and extract components.
 
@@ -284,9 +286,13 @@ def augment_from_pymanager(
       2. Extract each MSI using ``msiexec /a``
       3. Copy Scripts, DLLs, tcl, Lib, libs, include into py_root
     """
+    def _check_cancel() -> None:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("MSI augmentation cancelled by user.")
+
     ftp_arch = _ARCH_FTP_DIR.get(arch)
     if not ftp_arch:
-        audit("pymanager_skip", reason=f"unsupported_arch_{arch}")
+        audit("pymanager_skip", level="WARNING", reason=f"unsupported_arch_{arch}")
         log_cb(f"Unsupported architecture for MSI packages: {arch}")
         return PyManagerResult(status="skipped", reason="unsupported_arch")
 
@@ -298,8 +304,10 @@ def augment_from_pymanager(
     msi_cache.mkdir(parents=True, exist_ok=True)
 
     # ── 1. Download MSI packages ──────────────────────────────────────
+    _check_cancel()
     downloaded: list[Path] = []
     for msi_name, desc in _MSI_PACKAGES:
+        _check_cancel()
         url = f"{base_url}/{msi_name}"
         msi_path = msi_cache / msi_name
         has_cached = msi_path.exists() and msi_path.stat().st_size > 0
@@ -327,6 +335,7 @@ def augment_from_pymanager(
                 log_cb(f"  {msi_name}: source download failed, using cached copy")
                 audit(
                     "pymanager_msi_cache_fallback",
+                    level="WARNING",
                     name=msi_name,
                     url=url,
                     error=str(exc),
@@ -334,6 +343,7 @@ def augment_from_pymanager(
             else:
                 audit(
                     "pymanager_msi_unavailable",
+                    level="WARNING",
                     name=msi_name,
                     url=url,
                     error=str(exc),
@@ -341,8 +351,8 @@ def augment_from_pymanager(
                 log_cb(f"  {msi_name}: not available")
 
     if not downloaded:
-        audit("pymanager_no_msi", base_url=base_url)
-        log_cb("No MSI packages available for this version/arch — skipping.")
+        audit("pymanager_no_msi", level="WARNING", base_url=base_url)
+        log_cb("No MSI packages available for this version/arch - skipping.")
         return PyManagerResult(status="skipped", reason="no_msi_available")
 
     log_cb(f"Downloaded {len(downloaded)}/{len(_MSI_PACKAGES)} MSI packages")
@@ -352,19 +362,21 @@ def augment_from_pymanager(
     if tmp_extract.exists():
         shutil.rmtree(tmp_extract, ignore_errors=True)
 
+    _check_cancel()
     ok_count = 0
     for msi_path in downloaded:
+        _check_cancel()
         log_cb(f"  Extracting {msi_path.name}...")
         if _extract_msi(msi_path, tmp_extract, log_cb):
             ok_count += 1
             audit("pymanager_extract_ok", name=msi_path.name)
         else:
-            audit("pymanager_extract_fail", name=msi_path.name)
+            audit("pymanager_extract_fail", level="WARNING", name=msi_path.name)
 
     if ok_count == 0:
         shutil.rmtree(tmp_extract, ignore_errors=True)
-        audit("pymanager_extract_all_failed")
-        log_cb("All MSI extractions failed — skipping.")
+        audit("pymanager_extract_all_failed", level="ERROR")
+        log_cb("All MSI extractions failed - skipping.")
         return PyManagerResult(status="skipped", reason="extraction_failed")
 
     # ── 3. Flatten MSI platform sub-dirs before copying ─────────────
