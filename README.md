@@ -1,23 +1,23 @@
-# PyEmbedBuilder
+# PythonEmbeddedBuilder
 
 ![Version](https://img.shields.io/badge/version-1.0.0-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows_10%2F11-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-**PyEmbedBuilder**  is a user-friendly GUI for creating portable, open-source Python applications that you can share with other Windows users who don’t feel confident setting up a full Python environment themselves. It uses a .bat file to launch your (.py) Python app in a clear and secure way. It launches as easily as any regular (.exe) executable software, but without the need to compile binary executables or pay hundreds of dollars to have your apps signed. It fully exposes the launcher and application source code to all end users, making it better suited for open for security audits open-source distribution rather than fully closed-source software. I’m simply sharing it with anyone interested, as I originally built this tool for my own use.
+**PythonEmbeddedBuilder**  is a user-friendly GUI for creating portable, open-source Python applications that you can share with other Windows users who don’t feel confident setting up a full Python environment themselves. It uses a .bat file to launch your (.py) Python app in a clear and secure way. It launches as easily as any regular (.exe) executable software, but without the need to compile binary executables or pay hundreds of dollars to have your apps signed. It fully exposes the launcher and application source code to all end users, making it better suited for open for security audits open-source distribution rather than fully closed-source software. I’m simply sharing it with anyone interested, as I originally built this tool for my own use.
 
 <img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/3371eb8a-36a2-4b3b-baa9-c8476d489b3f" />
 
 
 It automates the complex process of downloading embedded Python distributions, verifying their integrity, bootstrapping `pip`, installing dependencies, and securely extracting official components (like Tcl/Tk for Tkinter support) into a clean, portable folder structure.
-# [Direct Link to Download](https://github.com/Vinventive/PyEmbedBuilder/releases/download/v1.0.0-beta/PyEmbedBuilder_v1.0.0-beta.7z)
-<img src="https://count.getloli.com/@PyEmbedBuilder?name=PyEmbedBuilder&theme=booru-lewd&padding=7&offset=0&align=top&scale=1.5&pixelated=1&darkmode=auto" />
+# [Direct Link to Download](https://github.com/Vinventive/PythonEmbeddedBuilder/releases/download/v1.0.0-beta/PythonEmbeddedBuilder_v1.0.0-beta.7z)
+<img src="https://count.getloli.com/@PythonEmbeddedBuilder?name=PythonEmbeddedBuilder&theme=booru-lewd&padding=7&offset=0&align=top&scale=1.5&pixelated=1&darkmode=auto" />
 
 ---
 
 ## 🔒 Security & Integrity
 
-Security is the core design principle of PyEmbedBuilder:
+Security is the core design principle of PythonEmbeddedBuilder:
 
 *   **Strict Verification:** All downloads from `python.org` are verified.
 *   **HTTPS Only:** Enforced TLS for network operations.
@@ -42,19 +42,19 @@ Security is the core design principle of PyEmbedBuilder:
 
 ### 1. Download & Verify
 Download the release archive and its signature:
-*   `PyEmbedBuilder_(version).7z`
-*   `PyEmbedBuilder_(version).7z.sha256`
+*   `PythonEmbeddedBuilder_(version).7z`
+*   `PythonEmbeddedBuilder_(version).7z.sha256`
 
 **Verify the integrity (PowerShell):**
 ```powershell
-Get-FileHash .\PyEmbedBuilder_(version).7z -Algorithm SHA256
-# Compare output with the content of PyEmbedBuilder_(version).7z.sha256
+Get-FileHash .\PythonEmbeddedBuilder_(version).7z -Algorithm SHA256
+# Compare output with the content of PythonEmbeddedBuilder_(version).7z.sha256
 ```
 
 ### 2. Installation
-PyEmbedBuilder is fully portable.  No installation is required. It has been successfully built with a running instance of itself.
+PythonEmbeddedBuilder is fully portable.  No installation is required. It has been successfully built with a running instance of itself.
 The standalone portable version has been compressed with free 7-Zip software. To avoid any issues with .7z archives, I advise installing 26.02 version or later. Free official 7-Zip software for Windows, available [here](https://7-zip.org/download.html).
-1.  Extract `PyEmbedBuilder.7z` to a location of your choice (e.g., `C:\PyEmbedBuilder`).
+1.  Extract `PythonEmbeddedBuilder.7z` to a location of your choice (e.g., `C:\PythonEmbeddedBuilder`).
 2.  Navigate to the extracted folder.
 
 ### 3. Usage
