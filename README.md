@@ -53,7 +53,7 @@ Get-FileHash .\PyEmbedBuilder_(version).7z -Algorithm SHA256
 
 ### 2. Installation
 PyEmbedBuilder is fully portable.  No installation is required. It has been successfully built with a running instance of itself.
-The standalone portable version has been compressed with free 7-Zip software. To avoid any issues with .7z archives, I advise installing the free official 7-Zip software for Windows, available [here](https://7-zip.org/download.html).
+The standalone portable version has been compressed with free 7-Zip software. To avoid any issues with .7z archives, I advise installing 26.02 version or later. Free official 7-Zip software for Windows, available [here](https://7-zip.org/download.html).
 1.  Extract `PyEmbedBuilder.7z` to a location of your choice (e.g., `C:\PyEmbedBuilder`).
 2.  Navigate to the extracted folder.
 
